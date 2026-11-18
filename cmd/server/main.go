@@ -93,7 +93,10 @@ func main() {
 			RPS:   cfg.RateLimit.RPS,
 			Burst: cfg.RateLimit.Burst,
 		}),
-		middleware.AuthMiddleware(cfg.API.Keys, luaProvider),
+		middleware.AuthMiddlewareWithOptions(cfg.API.Keys, luaProvider, middleware.AuthOptions{
+			MediaSessions: handlers.MediaSessions(),
+			QueryTokens:   cfg.MediaGrants.QueryTokens,
+		}),
 	)
 
 	port := os.Getenv("SERVER_PORT")

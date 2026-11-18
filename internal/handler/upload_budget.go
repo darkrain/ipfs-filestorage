@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/borg001/ipfs-filestorage/internal/middleware"
 )
 
 // uploadBudget bounds what one session uploads in a day on this instance.
@@ -29,10 +31,26 @@ func newUploadBudget(limit int64) *uploadBudget {
 	return &uploadBudget{limit: limit, used: map[string]int64{}}
 }
 
+// allow charges an upload to its session. A static API key is a service, not
+// a session, and is not metered; a request whose session cannot be named is
+// refused rather than let through unmetered (theGHub1/docs#170).
+func (b *uploadBudget) allow(r *http.Request, size int64) bool {
+	if b == nil {
+		return true
+	}
+	if middleware.IsAPIKey(r.Context()) {
+		return true
+	}
+	return b.take(uploadSessionKey(r), size)
+}
+
 // take records size bytes for the session and answers whether they fit.
 func (b *uploadBudget) take(key string, size int64) bool {
-	if b == nil || key == "" {
+	if b == nil {
 		return true
+	}
+	if key == "" {
+		return false
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -48,15 +66,17 @@ func (b *uploadBudget) take(key string, size int64) bool {
 }
 
 // uploadSessionKey names the session an upload comes from without keeping
-// its token.
+// its token. It is the token authentication accepted - resolved once by the
+// auth middleware, in its order and trimmed - never a second reading of the
+// request: the budget used to hash the untrimmed header and the first ?token=
+// while authentication took ?access_token=, a trimmed header and the last
+// ?token=, so each spelling of one session got a budget of its own.
 func uploadSessionKey(r *http.Request) string {
-	token := ""
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		token = strings.TrimPrefix(auth, "Bearer ")
-	} else if cookie, err := r.Cookie("iamfree_media_token"); err == nil {
-		token = cookie.Value
-	} else {
-		token = r.URL.Query().Get("token")
+	token := middleware.SessionToken(r.Context())
+	if token == "" {
+		if scheme, value, ok := strings.Cut(strings.TrimSpace(r.Header.Get("Authorization")), " "); ok && strings.EqualFold(scheme, "Bearer") {
+			token = strings.TrimSpace(value)
+		}
 	}
 	if token == "" {
 		return ""

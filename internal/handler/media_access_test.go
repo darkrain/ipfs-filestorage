@@ -264,7 +264,7 @@ func TestVideoPolicyProtectsMasterSegmentsAndPosters(t *testing.T) {
 		// not one named by editable metadata.
 		cluster.files[testMasterCID] = []byte(testVideoMasterPosters(testPosterCID, maskedPosterCID))
 		policy := policyServer(t, testPosterCID, []map[string]interface{}{{
-			"storage_uri": "video://" + testMasterCID, "poster_uri": "ipfs://" + testPosterCID,
+			"storage_uri": "video://" + testMasterCID, "video_root": true, "poster_uri": "ipfs://" + testPosterCID,
 			"delivery_mode": "blur_faces",
 		}})
 		defer policy.Close()
@@ -284,7 +284,7 @@ func TestVideoPolicyProtectsMasterSegmentsAndPosters(t *testing.T) {
 		cluster.files[blurPosterCID] = []byte("blurred-poster")
 		cluster.files[testMasterCID] = []byte(testVideoMasterPosters(testPosterCID, blurPosterCID))
 		policy := policyServer(t, testPosterCID, []map[string]interface{}{{
-			"storage_uri": "video://" + testMasterCID, "poster_uri": "ipfs://" + testPosterCID,
+			"storage_uri": "video://" + testMasterCID, "video_root": true, "poster_uri": "ipfs://" + testPosterCID,
 			"delivery_mode": "blur",
 			"metadata": map[string]interface{}{
 				"poster_aliases": map[string]interface{}{

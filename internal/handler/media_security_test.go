@@ -15,7 +15,7 @@ func TestMediaLinkCannotAuthorizeAnotherResource(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			policy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{"item": map[string]interface{}{
-					"delivery_mode": mode, "storage_uri": "video://" + testMasterCID, "poster_uri": "ipfs://" + testPosterCID,
+					"delivery_mode": mode, "storage_uri": "video://" + testMasterCID, "video_root": true, "poster_uri": "ipfs://" + testPosterCID,
 					// Even a forged child list cannot enlarge the actual playlist tree.
 					"metadata": map[string]interface{}{"stream_cids": []string{testMissingCID}},
 				}})
@@ -86,7 +86,7 @@ func TestFaceHiddenVideoDeniesAllStreamPaths(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			replacement := testCID("SafePoster")
 			policy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				row := map[string]interface{}{"delivery_mode": mode, "storage_uri": "video://" + testMasterCID, "poster_uri": "ipfs://" + testPosterCID,
+				row := map[string]interface{}{"delivery_mode": mode, "storage_uri": "video://" + testMasterCID, "video_root": true, "poster_uri": "ipfs://" + testPosterCID,
 					"metadata": map[string]interface{}{"poster_aliases": map[string]interface{}{testPosterCID: map[string]interface{}{"blur": testPosterCID, "blur_faces": testPosterCID}}}}
 				if strings.Contains(r.URL.Path, "/view/id/") {
 					_ = json.NewEncoder(w).Encode(map[string]interface{}{"item": row})
@@ -158,7 +158,7 @@ func TestLegacyHLSRootAuthorizesOnlyItsActualChildren(t *testing.T) {
 			t.Error("policy must resolve the root, not an unregistered segment")
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"rows": []interface{}{map[string]interface{}{
-			"storage_uri": "video://" + testMasterCID, "delivery_mode": "original",
+			"storage_uri": "video://" + testMasterCID, "video_root": true, "delivery_mode": "original",
 		}}})
 	}))
 	defer policy.Close()

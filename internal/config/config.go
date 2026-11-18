@@ -32,6 +32,10 @@ type ServerConfig struct {
 type MediaGrantConfig struct {
 	Enabled                                        bool
 	ActiveKey, Audience, Keys, RedisURL, Namespace string
+	// QueryTokens accepts a raw session token in ?token= / ?access_token=
+	// (MEDIA_QUERY_TOKENS). Off: media addresses carry a sealed, one-hour
+	// media session instead of the account session (theGHub1/docs#154).
+	QueryTokens bool
 }
 
 type IPFSConfig struct {
@@ -88,6 +92,10 @@ type ImagePrivacyConfig struct {
 	FaceDetectionScoreThreshold float64
 	// FaceDetectionNMSThreshold controls YuNet non-maximum suppression.
 	FaceDetectionNMSThreshold float64
+	// WorkingPixels bounds the copy of an upload that privacy variants and
+	// sizes are made from (IMAGE_WORKING_PIXELS); a larger picture is scaled
+	// down first instead of being blurred at full size.
+	WorkingPixels int
 }
 
 func DefaultImagePrivacyConfig() ImagePrivacyConfig {
@@ -97,6 +105,7 @@ func DefaultImagePrivacyConfig() ImagePrivacyConfig {
 		FaceDetectionMaxDimension:   1280,
 		FaceDetectionScoreThreshold: 0.8,
 		FaceDetectionNMSThreshold:   0.3,
+		WorkingPixels:               12_000_000,
 	}
 }
 
@@ -119,6 +128,9 @@ func NormalizeImagePrivacyConfig(value ImagePrivacyConfig) ImagePrivacyConfig {
 	if value.FaceDetectionNMSThreshold <= 0 {
 		value.FaceDetectionNMSThreshold = defaults.FaceDetectionNMSThreshold
 	}
+	if value.WorkingPixels <= 0 {
+		value.WorkingPixels = defaults.WorkingPixels
+	}
 	value.FaceDetectionScoreThreshold = clampFloat(value.FaceDetectionScoreThreshold, 0.1, 0.99)
 	value.FaceDetectionNMSThreshold = clampFloat(value.FaceDetectionNMSThreshold, 0.1, 0.99)
 	return value
@@ -133,6 +145,9 @@ type ImageConfig struct {
 	WebPQuality       int
 	ResizePolicy      string
 	Privacy           ImagePrivacyConfig
+	// ProcessSlots is how many pictures one process works on at once
+	// (IMAGE_PROCESS_SLOTS), across every upload route.
+	ProcessSlots int
 }
 
 type PinningConfig struct {
@@ -286,7 +301,9 @@ func Load() *Config {
 				FaceDetectionMaxDimension:   clampInt(getEnvInt("IMAGE_FACE_DETECTION_MAX_DIMENSION", 1280), 128, 4096),
 				FaceDetectionScoreThreshold: clampFloat(getEnvFloat("IMAGE_FACE_DETECTION_SCORE_THRESHOLD", 0.8), 0.1, 0.99),
 				FaceDetectionNMSThreshold:   clampFloat(getEnvFloat("IMAGE_FACE_DETECTION_NMS_THRESHOLD", 0.3), 0.1, 0.99),
+				WorkingPixels:               clampInt(getEnvInt("IMAGE_WORKING_PIXELS", 12_000_000), 1_000_000, 100_000_000),
 			},
+			ProcessSlots: clampInt(getEnvInt("IMAGE_PROCESS_SLOTS", 1), 1, 8),
 		},
 		Pinning: PinningConfig{
 			Retries:      getEnvInt("PINNING_RETRIES", 3),
@@ -338,6 +355,9 @@ func Load() *Config {
 			Keys:      getEnv("MEDIA_GRANT_KEYS", ""),
 			RedisURL:  getEnv("MEDIA_GRANT_REDIS_URL", ""),
 			Namespace: getEnv("MEDIA_GRANT_NAMESPACE", ""),
+			// Only for the rollout window, while open tabs of the previous web
+			// app still put the session token in addresses.
+			QueryTokens: getEnvBool("MEDIA_QUERY_TOKENS", false),
 		},
 		RateLimit: RateLimitConfig{
 			// A single media-heavy page loads many authenticated thumbnails in

@@ -36,6 +36,10 @@ type Response struct {
 	Type     string                  `json:"type,omitempty"`
 	Original *bundle.Asset           `json:"original,omitempty"`
 	Variants map[string]bundle.Asset `json:"variants,omitempty"`
+	// Receipt is the storage's sealed word that this session uploaded the
+	// file. The web app hands it to the API, which records the uploader;
+	// only the uploader may then attach the file to a chat or a ticket.
+	Receipt string `json:"receipt,omitempty"`
 }
 
 // Handler содержит HTTP-хендлеры сервиса.
@@ -268,7 +272,7 @@ func (h *Handler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if !h.uploads.take(uploadSessionKey(r), limitedReader.bytesRead) {
+	if !h.uploads.allow(r, limitedReader.bytesRead) {
 		writeUploadError(w, r, http.StatusTooManyRequests, "upload_quota_exceeded", nil)
 		return
 	}
@@ -295,7 +299,32 @@ func (h *Handler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.replicateAsync(manifest.CID)
-	writeJSON(w, http.StatusOK, responseFromManifest(manifest, true))
+	response := responseFromManifest(manifest, true)
+	response.Receipt = h.uploadReceipt(r, "file", manifest.CID, nil)
+	writeJSON(w, http.StatusOK, response)
+}
+
+// uploadReceipt seals what this upload produced for the session that sent
+// it, or nothing when grants are off or the uploader is a service key.
+func (h *Handler) uploadReceipt(r *http.Request, kind, cid string, children []string) string {
+	if h.mediaGrants == nil || h.mediaGrants.codec == nil {
+		return ""
+	}
+	token := middleware.SessionToken(r.Context())
+	if token == "" {
+		if scheme, value, ok := strings.Cut(strings.TrimSpace(r.Header.Get("Authorization")), " "); ok && strings.EqualFold(scheme, "Bearer") {
+			token = strings.TrimSpace(value)
+		}
+	}
+	if token == "" {
+		return ""
+	}
+	receipt, err := h.mediaGrants.codec.SealReceipt(token, kind, cid, children, time.Now())
+	if err != nil {
+		log.Printf("[UPLOAD] receipt for %s: %v", cid, err)
+		return ""
+	}
+	return receipt
 }
 
 // maxFilesPerUpload bounds one multi-file upload.
@@ -326,7 +355,7 @@ func (h *Handler) HandleUploadMultiple(w http.ResponseWriter, r *http.Request) {
 	for _, fh := range files {
 		batchBytes += fh.Size
 	}
-	if !h.uploads.take(uploadSessionKey(r), batchBytes) {
+	if !h.uploads.allow(r, batchBytes) {
 		writeUploadError(w, r, http.StatusTooManyRequests, "upload_quota_exceeded", nil)
 		return
 	}
@@ -409,8 +438,10 @@ func (h *Handler) HandleUploadMultiple(w http.ResponseWriter, r *http.Request) {
 			}
 			h.replicateAsync(manifest.CID)
 
+			response := responseFromManifest(manifest, true)
+			response.Receipt = h.uploadReceipt(r, "file", manifest.CID, nil)
 			mu.Lock()
-			results[idx] = responseFromManifest(manifest, true)
+			results[idx] = response
 			mu.Unlock()
 		}(i, fh)
 	}

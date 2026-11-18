@@ -27,6 +27,10 @@ type VideoResponse struct {
 	PosterAliases     map[string]map[string]string `json:"poster_aliases,omitempty"`
 	DurationSec       float64                      `json:"duration_sec"`
 	Status            string                       `json:"status"`
+	// Receipt binds the master to the encoder's output: the API records a
+	// video root only from it, so a text file uploaded as a "master" never
+	// becomes one (theGHub1/docs#152).
+	Receipt string `json:"receipt,omitempty"`
 }
 
 // clusterAdder адаптирует ipfs.Clusterer к интерфейсу video.IPFSAdder.
@@ -95,7 +99,7 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if !h.uploads.take(uploadSessionKey(r), limitedReader.bytesRead) {
+	if !h.uploads.allow(r, limitedReader.bytesRead) {
 		writeUploadError(w, r, http.StatusTooManyRequests, "upload_quota_exceeded", nil)
 		return
 	}
@@ -171,6 +175,7 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 		DurationSec:       result.Duration,
 		Status:            "processing_done",
 	}
+	resp.Receipt = h.uploadReceipt(r, "video", uploadResult.MasterCID, videoReceiptChildren(uploadResult))
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -706,6 +711,31 @@ func (h *Handler) serveStreamAsset(w http.ResponseWriter, r *http.Request, cid, 
 	io.Copy(w, reader)
 }
 
+// videoReceiptChildren is everything the encoder wrote beside the master:
+// playlists, segments, posters and their privacy renditions.
+func videoReceiptChildren(result *video.UploadResult) []string {
+	seen := map[string]bool{result.MasterCID: true}
+	children := []string{}
+	add := func(cid string) {
+		if cid != "" && !seen[cid] {
+			seen[cid] = true
+			children = append(children, cid)
+		}
+	}
+	for _, cid := range result.AllCIDs {
+		add(cid)
+	}
+	for _, cid := range result.PosterCIDs {
+		add(cid)
+	}
+	for _, variants := range result.PrivacyPosterCIDs {
+		for _, cid := range variants {
+			add(cid)
+		}
+	}
+	return children
+}
+
 func videoPosterAliases(posters map[string]string, privacy map[string]map[string]string) map[string]map[string]string {
 	aliases := make(map[string]map[string]string)
 	for size, original := range posters {
@@ -774,6 +804,11 @@ func playlistAuthSuffix(query url.Values) string {
 	}
 	if mediaLink := query.Get("media_link"); mediaLink != "" {
 		values.Set("media_link", mediaLink)
+	}
+	// The player fetches the playlists and parts itself: they carry the
+	// viewer's sealed media session on, never the session token.
+	if session := query.Get("media_session"); session != "" {
+		values.Set("media_session", session)
 	}
 	if len(values) == 0 {
 		return ""

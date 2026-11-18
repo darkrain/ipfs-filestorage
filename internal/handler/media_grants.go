@@ -11,6 +11,7 @@ import (
 
 	"github.com/borg001/ipfs-filestorage/internal/config"
 	"github.com/borg001/ipfs-filestorage/internal/mediagrant"
+	"github.com/borg001/ipfs-filestorage/internal/middleware"
 )
 
 type grantState interface {
@@ -49,6 +50,15 @@ func newMediaGrantVerifier(cfg config.MediaGrantConfig) (*mediaGrantVerifier, er
 		return nil, err
 	}
 	return &mediaGrantVerifier{codec: codec, state: state}, nil
+}
+
+// MediaSessions opens the media sessions the API seals with the grant keys,
+// or nil when grants are off.
+func (h *Handler) MediaSessions() middleware.MediaSessionOpener {
+	if h.mediaGrants == nil || h.mediaGrants.codec == nil {
+		return nil
+	}
+	return h.mediaGrants.codec
 }
 
 func mediaGrantToken(r *http.Request) string {

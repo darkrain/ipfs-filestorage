@@ -134,6 +134,7 @@ func TestHandleStreamLinkRewritesEveryHLSReferenceWithoutCIDs(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"item": map[string]interface{}{
 			"delivery_mode": map[string]interface{}{"value": "original"},
 			"storage_uri":   map[string]interface{}{"value": "video://" + testMasterCID},
+			"video_root":    true,
 			"poster_uri":    map[string]interface{}{"value": "ipfs://" + testPosterCID},
 		}})
 	}))
@@ -201,6 +202,7 @@ func TestHandleStreamLinkServesBlurredPosterForPrivateVideo(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"item": map[string]interface{}{
 			"delivery_mode": map[string]interface{}{"value": "blur"},
 			"storage_uri":   map[string]interface{}{"value": "video://" + testMasterCID},
+			"video_root":    true,
 			"poster_uri":    map[string]interface{}{"value": "ipfs://" + testPosterCID},
 			"metadata": map[string]interface{}{"value": map[string]interface{}{
 				"poster_aliases": map[string]interface{}{

@@ -45,6 +45,9 @@ type Processor struct {
 
 func NewProcessor(cfg config.ImageConfig, ffmpegPath string) *Processor {
 	cfg.Privacy = config.NormalizeImagePrivacyConfig(cfg.Privacy)
+	if cfg.ProcessSlots > 0 {
+		SetProcessSlots(cfg.ProcessSlots)
+	}
 	faceDetector, err := newYuNetFaceDetector(cfg.Privacy)
 	return &Processor{cfg: cfg, ffmpegPath: ffmpegPath, faceDetector: faceDetector, faceDetectorErr: err}
 }
@@ -145,6 +148,11 @@ func fitInside(src image.Image, maxSide int) image.Image {
 }
 
 func (p *Processor) Process(ctx context.Context, data []byte, contentType string) (Result, error) {
+	release, err := acquireSlot(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	defer release()
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
 		return Result{IsImage: false}, nil
@@ -163,6 +171,8 @@ func (p *Processor) Process(ctx context.Context, data []byte, contentType string
 	if err != nil {
 		return result, nil
 	}
+	// Everything below is made from a bounded copy; the full decode is let go.
+	src = workingImage(src, p.cfg.Privacy.WorkingPixels)
 	outputFormat := p.outputFormat(result.Format)
 	privacyVariants, err := p.privacyVariants(ctx, src, outputFormat)
 	if err != nil {
@@ -214,14 +224,23 @@ func (p *Processor) Process(ctx context.Context, data []byte, contentType string
 // is used for video posters after ffmpeg extracts them, so video upload shares
 // the same format, blur and face-detection behavior as ordinary image upload.
 func (p *Processor) ProcessPrivacy(ctx context.Context, data []byte, contentType string) ([]Variant, error) {
-	_, format, err := image.DecodeConfig(bytes.NewReader(data))
+	release, err := acquireSlot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
 		return nil, nil
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > MaxDecodePixels {
+		return nil, ErrImageTooLarge
 	}
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil, nil
 	}
+	src = workingImage(src, p.cfg.Privacy.WorkingPixels)
 	return p.privacyVariants(ctx, src, p.outputFormat(normalizeFormat(format, contentType)))
 }
 

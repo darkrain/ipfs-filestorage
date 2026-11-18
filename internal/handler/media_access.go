@@ -225,7 +225,12 @@ func (r *mediaAccessResolver) resolve(ctx context.Context, source *http.Request,
 		if decision.SourceCID == "" {
 			decision.SourceCID = mediaStorageCID(row["storage_uri"])
 			sourceURI, _ := responseString(row["storage_uri"])
-			decision.SourceIsVideo = strings.HasPrefix(sourceURI, "video://")
+			// A master is trusted to name its posters and parts only when the
+			// API vouches that the encoder wrote it. The video:// scheme is
+			// written by whoever registers the file, and a text file
+			// registered as one listed another user's photo as its poster
+			// and served it unblurred (theGHub1/docs#152).
+			decision.SourceIsVideo = strings.HasPrefix(sourceURI, "video://") && responseBool(row["video_root"])
 		}
 		if decision.PosterCID == "" {
 			decision.PosterCID = mediaStorageCID(row["poster_uri"])
@@ -268,6 +273,17 @@ func responseMap(value interface{}) (map[string]interface{}, bool) {
 		}
 	}
 	return nil, false
+}
+
+func responseBool(value interface{}) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case map[string]interface{}:
+		return responseBool(typed["value"])
+	default:
+		return false
+	}
 }
 
 func responseString(value interface{}) (string, bool) {
