@@ -87,3 +87,25 @@ func TestReceiptIsBoundToItsSession(t *testing.T) {
 		t.Fatal("a receipt was sealed for a path")
 	}
 }
+
+func TestPolicyCallerProofIsSealedAndShortLived(t *testing.T) {
+	c := testCodec(t, "stand-a")
+	now := time.Unix(1_800_000_000, 0)
+	proof, err := c.SealPolicyCaller(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.OpenPolicyCaller(proof, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.OpenPolicyCaller(proof, now.Add(PolicyCallerTTL)); !errors.Is(err, ErrExpired) {
+		t.Fatalf("an old proof opened: %v", err)
+	}
+	if err := testCodec(t, "stand-b").OpenPolicyCaller(proof, now); err == nil {
+		t.Fatal("another deployment's proof opened")
+	}
+	session, _, _ := c.SealMediaSession("session-one", now)
+	if err := c.OpenPolicyCaller(session, now); err == nil {
+		t.Fatal("a media session opened as a policy caller")
+	}
+}

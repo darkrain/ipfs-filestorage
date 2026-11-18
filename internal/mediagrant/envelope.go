@@ -171,3 +171,41 @@ func (c *Codec) OpenReceipt(encoded, token string, now time.Time) (Receipt, erro
 func receiptCID(cid string) bool {
 	return cid != "" && len(cid) <= 256 && !strings.ContainsAny(cid, "/\\?#: \t\r\n\"'")
 }
+
+// PolicyCallerTTL bounds a storage's proof that it is the one asking the
+// media policy.
+const PolicyCallerTTL = 5 * time.Minute
+
+const purposePolicyCaller = "iamfree-media-policy-caller:v1:"
+
+// PolicyCallerHeader carries that proof. The policy answers a storage with
+// the locators it needs to serve a blurred picture; a reader asking the same
+// endpoint gets the decision without them.
+const PolicyCallerHeader = "X-Media-Policy-Caller"
+
+type policyCaller struct {
+	Version   int   `json:"v"`
+	IssuedAt  int64 `json:"iat"`
+	ExpiresAt int64 `json:"exp"`
+}
+
+// SealPolicyCaller proves the bearer holds the media grant keys.
+func (c *Codec) SealPolicyCaller(now time.Time) (string, error) {
+	return c.sealPurpose(purposePolicyCaller, policyCaller{Version: 1, IssuedAt: now.Unix(), ExpiresAt: now.Add(PolicyCallerTTL).Unix()})
+}
+
+// OpenPolicyCaller checks such a proof.
+func (c *Codec) OpenPolicyCaller(encoded string, now time.Time) error {
+	var caller policyCaller
+	if err := c.openPurpose(purposePolicyCaller, encoded, 1024, &caller); err != nil {
+		return err
+	}
+	if caller.Version != 1 || caller.IssuedAt <= 0 || caller.IssuedAt > now.Unix()+60 || caller.ExpiresAt <= caller.IssuedAt ||
+		caller.ExpiresAt-caller.IssuedAt > int64(PolicyCallerTTL/time.Second) {
+		return ErrInvalid
+	}
+	if now.Unix() >= caller.ExpiresAt {
+		return ErrExpired
+	}
+	return nil
+}

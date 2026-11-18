@@ -53,6 +53,9 @@ type APIConfig struct {
 	Keys []string
 }
 
+// DefaultUploadExtensions are the files the app's upload fields accept.
+var DefaultUploadExtensions = []string{"png", "jpg", "jpeg", "webp", "heic", "heif", "pdf", "txt", "mp4", "mov", "webm", "avi", "mkv"}
+
 type UploadConfig struct {
 	MaxFileSize int64
 	// MaxRequestSize bounds the entire multipart body on every upload route.
@@ -246,12 +249,15 @@ func Load() *Config {
 			Keys: getEnvSlice("API_KEYS", []string{}),
 		},
 		// No HTML or SVG: storage is served from the app's origin, and such a
-		// file runs script there.
+		// file runs script there. Only what the app's upload fields accept is
+		// taken (theGHub1/docs#152): pictures and video everywhere, pdf in
+		// chat and support, plain text in support. json, doc, docx and zip
+		// were accepted by no field and let anyone keep arbitrary files here.
 		Upload: UploadConfig{
 			MaxFileSize:          getEnvInt64("UPLOAD_MAX_FILE_SIZE", 10*1024*1024),
 			MaxRequestSize:       getEnvInt64("UPLOAD_MAX_REQUEST_SIZE", 0),
 			DailyBytesPerSession: getEnvInt64("UPLOAD_DAILY_BYTES_PER_SESSION", 4*1024*1024*1024),
-			AllowedExtensions:    getEnvSlice("UPLOAD_ALLOWED_EXTENSIONS", []string{"png", "jpg", "jpeg", "webp", "heic", "heif", "pdf", "doc", "docx", "zip", "json", "txt", "mp4", "mov", "webm", "avi", "mkv"}),
+			AllowedExtensions:    getEnvSlice("UPLOAD_ALLOWED_EXTENSIONS", DefaultUploadExtensions),
 			AllowedMimeTypes: map[string]bool{
 				"image/png":  true,
 				"image/jpeg": true,
@@ -259,15 +265,11 @@ func Load() *Config {
 				// A phone shooting in "High Efficiency" uploads HEIC. It is
 				// converted to JPEG at ingest, so nothing downstream has to
 				// know the format.
-				"image/heic":          true,
-				"image/heif":          true,
-				"image/heic-sequence": true,
-				"image/heif-sequence": true,
-				"application/pdf":     true,
-				"application/msword":  true,
-				"application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
-				"application/zip":           true,
-				"application/json":          true,
+				"image/heic":                true,
+				"image/heif":                true,
+				"image/heic-sequence":       true,
+				"image/heif-sequence":       true,
+				"application/pdf":           true,
 				"application/octet-stream":  true,
 				"text/plain":                true,
 				"text/plain; charset=utf-8": true,

@@ -99,6 +99,10 @@ func NewHandler(cfg *config.Config) *Handler {
 		uploads:          newUploadBudget(cfg.Upload.DailyBytesPerSession),
 	}
 
+	if h.mediaAccess != nil && grants != nil && grants.codec != nil {
+		h.mediaAccess.callerProof = policyCallerProof(grants.codec)
+	}
+
 	// Запускаем TTL worker
 	if cfg.Unpin.TTL > 0 {
 		h.unpinWorker = unpin.NewWorker(cluster, unpinStore, cfg.Unpin.TTL, cfg.Unpin.GCInterval)
