@@ -193,6 +193,8 @@ type VideoConfig struct {
 	ThumbnailVariants []ImageVariant
 	// Время кадра для превью (сек)
 	ThumbnailTimeSec float64
+	// FFmpegThreads bounds the threads of each encoder (VIDEO_FFMPEG_THREADS).
+	FFmpegThreads int
 	// JPEG qscale для ffmpeg (1 лучше, 31 хуже)
 	ThumbnailQScale int
 }
@@ -336,6 +338,7 @@ func Load() *Config {
 				{Key: "720x1280", Width: 720, Height: 1280},
 			}),
 			ThumbnailTimeSec: getEnvFloat("VIDEO_THUMBNAIL_TIME_SEC", 1.0),
+			FFmpegThreads:    clampInt(getEnvInt("VIDEO_FFMPEG_THREADS", 2), 1, 16),
 			ThumbnailQScale:  clampInt(getEnvInt("VIDEO_THUMBNAIL_QSCALE", 3), 1, 31),
 		},
 		Auth: AuthConfig{

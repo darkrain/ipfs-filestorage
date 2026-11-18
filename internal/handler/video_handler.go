@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"log"
 	"errors"
 	"fmt"
 	"io"
@@ -68,10 +69,12 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 
 	// Проверяем свободное место на диске (3x от максимального размера)
 	if err := os.MkdirAll(h.cfg.Video.TempDir, 0o755); err != nil {
+		logVideoUploadFailure(r, "create video work directory", err)
 		writeUploadError(w, r, http.StatusInternalServerError, "upload_storage_unavailable", nil)
 		return
 	}
 	if err := checkDiskSpace(h.cfg.Video.TempDir, h.cfg.Video.MaxSizeBytes*3); err != nil {
+		logVideoUploadFailure(r, "disk space", err)
 		writeUploadError(w, r, http.StatusInsufficientStorage, "upload_storage_unavailable", nil)
 		return
 	}
@@ -79,6 +82,7 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	// Сохраняем во временный файл с серверной проверкой размера
 	tmpInput, err := os.CreateTemp(h.cfg.Video.TempDir, "video-input-*.mp4")
 	if err != nil {
+		logVideoUploadFailure(r, "create input file", err)
 		writeUploadError(w, r, http.StatusInternalServerError, "upload_storage_unavailable", nil)
 		return
 	}
@@ -88,6 +92,7 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	// Серверная проверка размера: ограничиваем чтение через LimitReader
 	limitedReader := &countingReader{r: io.LimitReader(file, h.cfg.Video.MaxSizeBytes+1)}
 	if _, err := tmpInput.ReadFrom(limitedReader); err != nil {
+		logVideoUploadFailure(r, "read upload", err)
 		writeUploadError(w, r, http.StatusInternalServerError, "upload_failed", nil)
 		return
 	}
@@ -128,6 +133,7 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	// Транскодирование
 	outputDir, err := os.MkdirTemp(h.cfg.Video.TempDir, "video-output-*")
 	if err != nil {
+		logVideoUploadFailure(r, "create output directory", err)
 		writeUploadError(w, r, http.StatusInternalServerError, "upload_storage_unavailable", nil)
 		return
 	}
@@ -137,6 +143,7 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	// time is stopped instead of holding the slot for good.
 	release, err := acquireTranscodeSlot(ctx)
 	if err != nil {
+		logVideoUploadFailure(r, "wait for a transcoding slot", err)
 		writeUploadError(w, r, http.StatusServiceUnavailable, "upload_busy", nil)
 		return
 	}
@@ -146,10 +153,12 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	transcoder := video.NewTranscoder(&h.cfg.Video)
 	result, err := transcoder.Transcode(transcodeCtx, tmpInput.Name(), outputDir)
 	if err != nil {
+		logVideoUploadFailure(r, "transcode", err)
 		writeUploadError(w, r, http.StatusInternalServerError, "upload_failed", nil)
 		return
 	}
 	if err := h.buildVideoPrivacyPosters(ctx, outputDir); err != nil {
+		logVideoUploadFailure(r, "privacy posters", err)
 		writeUploadError(w, r, http.StatusInternalServerError, "upload_failed", nil)
 		return
 	}
@@ -158,6 +167,7 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	uploader := video.NewUploader(&clusterAdder{cluster: h.cluster})
 	uploadResult, err := uploader.UploadDir(ctx, outputDir)
 	if err != nil {
+		logVideoUploadFailure(r, "add to IPFS", err)
 		writeUploadError(w, r, http.StatusServiceUnavailable, "upload_storage_unavailable", nil)
 		return
 	}
@@ -177,6 +187,20 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.Receipt = h.uploadReceipt(r, "video", uploadResult.MasterCID, videoReceiptChildren(uploadResult))
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// logVideoUploadFailure says which step of a video upload failed. The upload
+// answered 500 upload_failed and logged nothing, so a recording that the
+// encoder could not take was invisible in the storage's log (theGHub1/docs#150).
+func logVideoUploadFailure(r *http.Request, step string, err error) {
+	message := "<nil>"
+	if err != nil {
+		message = err.Error()
+	}
+	if len(message) > 2000 {
+		message = message[:1000] + " … " + message[len(message)-1000:]
+	}
+	log.Printf("[UPLOAD-VIDEO] %s failed: %s", step, message)
 }
 
 // HandleStreamMaster обрабатывает GET /stream/{cid}/master.m3u8.

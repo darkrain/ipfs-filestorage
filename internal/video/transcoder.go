@@ -102,7 +102,9 @@ func (t *Transcoder) buildHLSArgsForVariants(inputPath, outputDir string, varian
 	gop := fmt.Sprintf("%d", t.gopSize(frameRate))
 	forceKeyFrames := fmt.Sprintf("expr:gte(t,n_forced*%d)", t.cfg.SegmentDurationSec)
 
+	threads := strconv.Itoa(t.encoderThreads())
 	args := []string{
+		"-threads", threads,
 		"-i", inputPath,
 		"-y", // перезаписать
 	}
@@ -115,6 +117,19 @@ func (t *Transcoder) buildHLSArgsForVariants(inputPath, outputDir string, varian
 		args = append(args,
 			"-map", "v:0",
 			"-map", "0:a?",
+		)
+		// Each rendition is drawn at its own size: every one was encoded at the
+		// source's full size, three 1080p encoders (or 4K, from a phone) at
+		// once, and ffmpeg was killed for memory - the verification recorded in
+		// the browser at 1920x1080 failed with 500 (theGHub1/docs#150).
+		if side := renditionShortSide(variant.Name); side > 0 {
+			args = append(args, "-vf", renditionScale(side))
+		}
+		args = append(args,
+			// x264 starts threads and a look-ahead of frames per encoder by
+			// the host's cores, not the container's; both are bounded.
+			"-threads", threads,
+			"-rc-lookahead", "10",
 			"-c:v", "libx264",
 			"-b:v", variant.Bitrate,
 			"-maxrate", variant.Bitrate,
@@ -139,6 +154,35 @@ func (t *Transcoder) buildHLSArgsForVariants(inputPath, outputDir string, varian
 	}
 
 	return args
+}
+
+// renditionShortSide is the shorter side a rendition is drawn at; the
+// master playlist names these sizes. Zero keeps the source size.
+func renditionShortSide(name string) int {
+	switch name {
+	case "low":
+		return 480
+	case "medium":
+		return 720
+	case "high":
+		return 1080
+	default:
+		return 0
+	}
+}
+
+// renditionScale bounds the shorter side, in either orientation, and never
+// enlarges the picture; the other side follows the aspect ratio, even.
+func renditionScale(side int) string {
+	n := strconv.Itoa(side)
+	return "scale=w='if(gt(iw,ih),-2,min(iw," + n + "))':h='if(gt(iw,ih),min(ih," + n + "),-2)'"
+}
+
+func (t *Transcoder) encoderThreads() int {
+	if t.cfg.FFmpegThreads > 0 {
+		return t.cfg.FFmpegThreads
+	}
+	return 2
 }
 
 // selectVariants keeps the configured ladder for source videos that can use

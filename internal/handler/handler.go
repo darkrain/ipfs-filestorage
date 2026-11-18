@@ -298,6 +298,7 @@ func (h *Handler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	manifest, err := h.buildFileBundle(ctx, filename, data, contentType)
 	if err != nil {
+		log.Printf("[UPLOAD] build bundle failed: %v", err)
 		writeUploadError(w, r, http.StatusInternalServerError, "upload_failed", nil)
 		return
 	}
