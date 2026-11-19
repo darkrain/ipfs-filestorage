@@ -32,6 +32,10 @@ type ServerConfig struct {
 type MediaGrantConfig struct {
 	Enabled                                        bool
 	ActiveKey, Audience, Keys, RedisURL, Namespace string
+	// QueryTokens accepts a raw session token in ?token= / ?access_token=
+	// (MEDIA_QUERY_TOKENS). Off: media addresses carry a sealed, one-hour
+	// media session instead of the account session (theGHub1/docs#154).
+	QueryTokens bool
 }
 
 type IPFSConfig struct {
@@ -48,6 +52,9 @@ type IPFSConfig struct {
 type APIConfig struct {
 	Keys []string
 }
+
+// DefaultUploadExtensions are the files the app's upload fields accept.
+var DefaultUploadExtensions = []string{"png", "jpg", "jpeg", "webp", "heic", "heif", "pdf", "txt", "mp4", "mov", "webm", "avi", "mkv"}
 
 type UploadConfig struct {
 	MaxFileSize int64
@@ -88,6 +95,10 @@ type ImagePrivacyConfig struct {
 	FaceDetectionScoreThreshold float64
 	// FaceDetectionNMSThreshold controls YuNet non-maximum suppression.
 	FaceDetectionNMSThreshold float64
+	// WorkingPixels bounds the copy of an upload that privacy variants and
+	// sizes are made from (IMAGE_WORKING_PIXELS); a larger picture is scaled
+	// down first instead of being blurred at full size.
+	WorkingPixels int
 }
 
 func DefaultImagePrivacyConfig() ImagePrivacyConfig {
@@ -97,6 +108,7 @@ func DefaultImagePrivacyConfig() ImagePrivacyConfig {
 		FaceDetectionMaxDimension:   1280,
 		FaceDetectionScoreThreshold: 0.8,
 		FaceDetectionNMSThreshold:   0.3,
+		WorkingPixels:               12_000_000,
 	}
 }
 
@@ -119,6 +131,9 @@ func NormalizeImagePrivacyConfig(value ImagePrivacyConfig) ImagePrivacyConfig {
 	if value.FaceDetectionNMSThreshold <= 0 {
 		value.FaceDetectionNMSThreshold = defaults.FaceDetectionNMSThreshold
 	}
+	if value.WorkingPixels <= 0 {
+		value.WorkingPixels = defaults.WorkingPixels
+	}
 	value.FaceDetectionScoreThreshold = clampFloat(value.FaceDetectionScoreThreshold, 0.1, 0.99)
 	value.FaceDetectionNMSThreshold = clampFloat(value.FaceDetectionNMSThreshold, 0.1, 0.99)
 	return value
@@ -133,6 +148,9 @@ type ImageConfig struct {
 	WebPQuality       int
 	ResizePolicy      string
 	Privacy           ImagePrivacyConfig
+	// ProcessSlots is how many pictures one process works on at once
+	// (IMAGE_PROCESS_SLOTS), across every upload route.
+	ProcessSlots int
 }
 
 type PinningConfig struct {
@@ -163,8 +181,9 @@ type VideoConfig struct {
 	// Допустимое отклонение от пропорции 9:16
 	// Длительность одного чанка (сек)
 	SegmentDurationSec int
-	// Список битрейтов для адаптивного стриминга (напр. ["500k","1500k","4000k"])
-	Bitrates []string
+	// MaxLongSide is the longest frame side accepted (VIDEO_MAX_LONG_SIDE,
+	// 1280): the browser compresses a video to 720p before it is uploaded.
+	MaxLongSide int
 	// Путь к бинарнику ffmpeg
 	FFmpegPath string
 	// Путь к бинарнику ffprobe
@@ -231,12 +250,15 @@ func Load() *Config {
 			Keys: getEnvSlice("API_KEYS", []string{}),
 		},
 		// No HTML or SVG: storage is served from the app's origin, and such a
-		// file runs script there.
+		// file runs script there. Only what the app's upload fields accept is
+		// taken (theGHub1/docs#152): pictures and video everywhere, pdf in
+		// chat and support, plain text in support. json, doc, docx and zip
+		// were accepted by no field and let anyone keep arbitrary files here.
 		Upload: UploadConfig{
 			MaxFileSize:          getEnvInt64("UPLOAD_MAX_FILE_SIZE", 10*1024*1024),
 			MaxRequestSize:       getEnvInt64("UPLOAD_MAX_REQUEST_SIZE", 0),
 			DailyBytesPerSession: getEnvInt64("UPLOAD_DAILY_BYTES_PER_SESSION", 4*1024*1024*1024),
-			AllowedExtensions:    getEnvSlice("UPLOAD_ALLOWED_EXTENSIONS", []string{"png", "jpg", "jpeg", "webp", "heic", "heif", "pdf", "doc", "docx", "zip", "json", "txt", "mp4", "mov", "webm", "avi", "mkv"}),
+			AllowedExtensions:    getEnvSlice("UPLOAD_ALLOWED_EXTENSIONS", DefaultUploadExtensions),
 			AllowedMimeTypes: map[string]bool{
 				"image/png":  true,
 				"image/jpeg": true,
@@ -244,15 +266,11 @@ func Load() *Config {
 				// A phone shooting in "High Efficiency" uploads HEIC. It is
 				// converted to JPEG at ingest, so nothing downstream has to
 				// know the format.
-				"image/heic":          true,
-				"image/heif":          true,
-				"image/heic-sequence": true,
-				"image/heif-sequence": true,
-				"application/pdf":     true,
-				"application/msword":  true,
-				"application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
-				"application/zip":           true,
-				"application/json":          true,
+				"image/heic":                true,
+				"image/heif":                true,
+				"image/heic-sequence":       true,
+				"image/heif-sequence":       true,
+				"application/pdf":           true,
 				"application/octet-stream":  true,
 				"text/plain":                true,
 				"text/plain; charset=utf-8": true,
@@ -286,7 +304,9 @@ func Load() *Config {
 				FaceDetectionMaxDimension:   clampInt(getEnvInt("IMAGE_FACE_DETECTION_MAX_DIMENSION", 1280), 128, 4096),
 				FaceDetectionScoreThreshold: clampFloat(getEnvFloat("IMAGE_FACE_DETECTION_SCORE_THRESHOLD", 0.8), 0.1, 0.99),
 				FaceDetectionNMSThreshold:   clampFloat(getEnvFloat("IMAGE_FACE_DETECTION_NMS_THRESHOLD", 0.3), 0.1, 0.99),
+				WorkingPixels:               clampInt(getEnvInt("IMAGE_WORKING_PIXELS", 12_000_000), 1_000_000, 100_000_000),
 			},
+			ProcessSlots: clampInt(getEnvInt("IMAGE_PROCESS_SLOTS", 1), 1, 8),
 		},
 		Pinning: PinningConfig{
 			Retries:      getEnvInt("PINNING_RETRIES", 3),
@@ -307,7 +327,7 @@ func Load() *Config {
 			MaxDurationSec:     getEnvInt("VIDEO_MAX_DURATION_SEC", 2400),
 			MaxSizeBytes:       getEnvInt64("VIDEO_MAX_SIZE_MB", 1024) * 1024 * 1024,
 			SegmentDurationSec: getEnvInt("VIDEO_SEGMENT_DURATION_SEC", 4),
-			Bitrates:           getEnvSlice("VIDEO_BITRATES", []string{"500k", "1500k", "4000k"}),
+			MaxLongSide:        clampInt(getEnvInt("VIDEO_MAX_LONG_SIDE", 1280), 160, 4096),
 			FFmpegPath:         validateBinaryPath(getEnv("FFMPEG_PATH", "ffmpeg"), "ffmpeg"),
 			FFprobePath:        validateBinaryPath(getEnv("FFPROBE_PATH", "ffprobe"), "ffprobe"),
 			TempDir:            getEnv("VIDEO_TEMP_DIR", "/tmp/video_processing"),
@@ -338,6 +358,9 @@ func Load() *Config {
 			Keys:      getEnv("MEDIA_GRANT_KEYS", ""),
 			RedisURL:  getEnv("MEDIA_GRANT_REDIS_URL", ""),
 			Namespace: getEnv("MEDIA_GRANT_NAMESPACE", ""),
+			// Only for the rollout window, while open tabs of the previous web
+			// app still put the session token in addresses.
+			QueryTokens: getEnvBool("MEDIA_QUERY_TOKENS", false),
 		},
 		RateLimit: RateLimitConfig{
 			// A single media-heavy page loads many authenticated thumbnails in

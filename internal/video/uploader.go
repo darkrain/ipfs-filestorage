@@ -31,6 +31,15 @@ type UploadResult struct {
 // Uploader загружает сгенерированную HLS-структуру в IPFS.
 type Uploader struct {
 	adder IPFSAdder
+	// streams states each variant in the master playlist; a variant not in
+	// it gets the fixed figures of the old three-rendition ladder.
+	streams map[string]StreamInfo
+}
+
+// WithStreams sets what the master playlist states about each variant.
+func (u *Uploader) WithStreams(streams map[string]StreamInfo) *Uploader {
+	u.streams = streams
+	return u
 }
 
 // NewUploader создаёт новый Uploader.
@@ -205,9 +214,11 @@ func (u *Uploader) buildMasterPlaylist(variantCIDs map[string]string, fileCIDs m
 		if !ok {
 			continue
 		}
-		bw := bandwidth[name]
-		res := resolution[name]
-		b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s,CODECS=\"avc1.42e01e\"\n", bw, res))
+		bw, res, codecs := int64(bandwidth[name]), resolution[name], "avc1.42e01e"
+		if stream, ok := u.streams[name]; ok {
+			bw, res, codecs = stream.Bandwidth, stream.Resolution, stream.Codecs
+		}
+		b.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s,CODECS=\"%s\"\n", bw, res, codecs))
 		b.WriteString(fmt.Sprintf("../segment/%s.m3u8\n", cid))
 	}
 

@@ -2,259 +2,68 @@ package video
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/borg001/ipfs-filestorage/internal/config"
 )
 
-func TestBitrateToName(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"500k", "low"},
-		{"700k", "low"},
-		{"1500k", "medium"},
-		{"2000k", "medium"},
-		{"4000k", "high"},
-		{"8000k", "high"},
-		{"invalid", "invalid"},
-	}
-
-	for _, tt := range tests {
-		got := bitrateToName(tt.input)
-		if got != tt.want {
-			t.Errorf("bitrateToName(%q) = %q, want %q", tt.input, got, tt.want)
-		}
-	}
-}
-
-func TestMultiplyBitrate(t *testing.T) {
-	tests := []struct {
-		input  string
-		factor int
-		want   string
-	}{
-		{"500k", 2, "1000k"},
-		{"1500k", 2, "3000k"},
-		{"4000k", 3, "12000k"},
-		{"invalid", 2, "invalid"},
-	}
-
-	for _, tt := range tests {
-		got := multiplyBitrate(tt.input, tt.factor)
-		if got != tt.want {
-			t.Errorf("multiplyBitrate(%q, %d) = %q, want %q", tt.input, tt.factor, got, tt.want)
-		}
-	}
-}
-
-func TestMultiplyBitrateUppercase(t *testing.T) {
-	got := multiplyBitrate("500K", 2)
-	if got != "1000k" {
-		t.Errorf("multiplyBitrate(500K, 2) = %q, want 1000k", got)
-	}
-}
-
-func TestNewTranscoder(t *testing.T) {
-	cfg := &config.VideoConfig{
-		MaxDurationSec:     60,
-		SegmentDurationSec: 4,
-		Bitrates:           []string{"500k", "1500k", "4000k"},
-		FFmpegPath:         "ffmpeg",
-		FFprobePath:        "ffprobe",
-		TempDir:            t.TempDir(),
-	}
-
-	tr := NewTranscoder(cfg)
-	if tr == nil {
-		t.Fatal("NewTranscoder returned nil")
-	}
-	if tr.cfg != cfg {
-		t.Error("Transcoder config not set correctly")
-	}
-}
-
-func TestBuildHLSArgs(t *testing.T) {
-	cfg := &config.VideoConfig{
-		SegmentDurationSec: 4,
-		Bitrates:           []string{"500k", "1500k", "4000k"},
-		FFmpegPath:         "ffmpeg",
-		TempDir:            t.TempDir(),
-	}
-
-	tr := NewTranscoder(cfg)
-	args := tr.buildHLSArgs("/tmp/input.mp4", "/tmp/output")
-
-	hasInput := false
-	hasHlsTime := false
-	hasHlsSegmentType := false
-	hasGopSize := false
-	hasScThreshold := false
-	hasKeyintMin := false
-
-	for i, arg := range args {
-		if arg == "-i" && i+1 < len(args) && args[i+1] == "/tmp/input.mp4" {
-			hasInput = true
-		}
-		if arg == "-hls_time" {
-			hasHlsTime = true
-		}
-		if arg == "-hls_segment_type" {
-			hasHlsSegmentType = true
-		}
-		if arg == "-g" {
-			hasGopSize = true
-		}
-		if arg == "-sc_threshold" {
-			hasScThreshold = true
-		}
-		if arg == "-keyint_min" {
-			hasKeyintMin = true
-		}
-	}
-
-	if !hasInput {
-		t.Error("HLS args missing -i input")
-	}
-	if !hasHlsTime {
-		t.Error("HLS args missing -hls_time")
-	}
-	if !hasHlsSegmentType {
-		t.Error("HLS args missing -hls_segment_type (fMP4)")
-	}
-	if !hasGopSize {
-		t.Error("HLS args missing -g (keyframe interval)")
-	}
-	if !hasScThreshold {
-		t.Error("HLS args missing -sc_threshold")
-	}
-	if !hasKeyintMin {
-		t.Error("HLS args missing -keyint_min")
-	}
-
-	outputFiles := 0
-	for _, arg := range args {
-		if filepath.Ext(arg) == ".m3u8" {
-			outputFiles++
-		}
-	}
-	if outputFiles != 3 {
-		t.Errorf("Expected 3 variant playlists in args, got %d", outputFiles)
-	}
-}
-
-func TestBuildHLSArgsBitrateParams(t *testing.T) {
-	cfg := &config.VideoConfig{
-		SegmentDurationSec: 4,
-		Bitrates:           []string{"500k"},
-		FFmpegPath:         "ffmpeg",
-		TempDir:            t.TempDir(),
-	}
-
-	tr := NewTranscoder(cfg)
-	args := tr.buildHLSArgs("/tmp/input.mp4", "/tmp/output")
-	argsStr := strings.Join(args, " ")
-
-	if !strings.Contains(argsStr, "-b:v 500k") {
-		t.Error("Missing -b:v 500k for low bitrate")
-	}
-	if !strings.Contains(argsStr, "-maxrate 500k") {
-		t.Error("Missing -maxrate 500k for low bitrate")
-	}
-	if !strings.Contains(argsStr, "-bufsize 1000k") {
-		t.Error("Missing -bufsize (2x bitrate) for low bitrate")
-	}
-	if !strings.Contains(argsStr, "-preset fast") {
-		t.Error("Missing -preset fast")
-	}
-	if !strings.Contains(argsStr, "-c:v libx264") {
-		t.Error("Missing -c:v libx264")
-	}
-}
-
-func TestBuildHLSArgsUsesFrameBasedGOP(t *testing.T) {
-	cfg := &config.VideoConfig{
-		SegmentDurationSec: 4,
-		Bitrates:           []string{"500k"},
-	}
-	tr := NewTranscoder(cfg)
-	args := tr.buildHLSArgsForVariants("/tmp/input.mp4", "/tmp/output", []hlsVariant{{Name: "low", Bitrate: "500k"}}, 30)
+// The storage cuts a video into segments without encoding it: ffmpeg copies
+// the streams. Three x264 renditions on two CPUs starved serving and the
+// health check, and every image failed to load (theGHub1/docs#201).
+func TestRemuxCopiesStreamsWithoutEncoding(t *testing.T) {
+	tr := NewTranscoder(&config.VideoConfig{SegmentDurationSec: 4, FFmpegPath: "ffmpeg"})
+	args := tr.buildRemuxArgs("in.mp4", "out/medium")
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "-g 120") || !strings.Contains(joined, "-keyint_min 120") {
-		t.Fatalf("GOP must use frames for a four-second 30fps segment: %s", joined)
+	for _, want := range []string{"-c copy", "-map 0:v:0", "-map 0:a:0?", "-map_metadata -1", "-hls_segment_type fmp4", "-hls_time 4", "-threads 1", "out/medium/seg_%d.m4s", "out/medium/playlist.m3u8"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("no %q in %s", want, joined)
+		}
 	}
-	if !strings.Contains(joined, "-force_key_frames expr:gte(t,n_forced*4)") {
-		t.Fatalf("HLS segments must force a keyframe at the segment boundary: %s", joined)
-	}
-}
-
-func TestSelectVariantsAvoidsLowBitrateUpscaling(t *testing.T) {
-	tr := NewTranscoder(&config.VideoConfig{Bitrates: []string{"500k", "1500k", "4000k"}})
-	variants := tr.selectVariants(&VideoInfo{BitRate: 512000})
-	if len(variants) != 1 || variants[0] != (hlsVariant{Name: "low", Bitrate: "500k"}) {
-		t.Fatalf("low bitrate input must retain only the low rendition, got %#v", variants)
+	for _, encoder := range []string{"libx264", "-c:v", "-b:v", "-vf", "scale"} {
+		if strings.Contains(joined, encoder) {
+			t.Errorf("remux encodes (%s): %s", encoder, joined)
+		}
 	}
 }
 
-func TestSelectVariantsRetainsApplicableLadder(t *testing.T) {
-	tr := NewTranscoder(&config.VideoConfig{Bitrates: []string{"500k", "1500k", "4000k"}})
-	variants := tr.selectVariants(&VideoInfo{BitRate: 5_000_000})
-	if len(variants) != 3 {
-		t.Fatalf("high bitrate input must retain the configured ladder, got %#v", variants)
-	}
-}
-
-func TestBuildHLSArgsSegmentFilenames(t *testing.T) {
-	cfg := &config.VideoConfig{
-		SegmentDurationSec: 4,
-		Bitrates:           []string{"500k", "1500k"},
-		FFmpegPath:         "ffmpeg",
-		TempDir:            t.TempDir(),
-	}
-
-	tr := NewTranscoder(cfg)
-	args := tr.buildHLSArgs("/tmp/input.mp4", "/tmp/output")
-	argsStr := strings.Join(args, " ")
-
-	if !strings.Contains(argsStr, "low/seg_%d.m4s") {
-		t.Errorf("Missing low/seg_%%d.m4s segment filename pattern")
-	}
-	if !strings.Contains(argsStr, "medium/seg_%d.m4s") {
-		t.Errorf("Missing medium/seg_%%d.m4s segment filename pattern")
-	}
-}
-
-func TestBuildThumbnailArgs(t *testing.T) {
-	cfg := &config.VideoConfig{
-		FFmpegPath:       "ffmpeg",
-		ThumbnailTimeSec: 1.25,
-		ThumbnailQScale:  4,
-	}
-	tr := NewTranscoder(cfg)
-	args := tr.buildThumbnailArgs("/tmp/input.mp4", "/tmp/posters/180x320.jpg", config.ImageVariant{
-		Key:    "180x320",
-		Width:  180,
-		Height: 320,
+// One frame is decoded and scaled to every poster size in one ffmpeg run.
+func TestBuildThumbnailArgsDecodesOneFrame(t *testing.T) {
+	tr := NewTranscoder(&config.VideoConfig{
+		FFmpegPath: "ffmpeg", ThumbnailTimeSec: 1.25, ThumbnailQScale: 4,
+		ThumbnailVariants: []config.ImageVariant{{Key: "180x320", Width: 180, Height: 320}, {Key: "720x1280", Width: 720, Height: 1280}},
 	})
-	argsStr := strings.Join(args, " ")
+	args := tr.buildThumbnailArgs("in.mp4", "posters", 10)
+	joined := strings.Join(args, " ")
+	if strings.Count(joined, "-i ") != 1 || !strings.Contains(joined, "-ss 1.250") {
+		t.Fatalf("one input seeked to the poster time expected: %s", joined)
+	}
+	for _, want := range []string{"split=2", "scale=180:320:force_original_aspect_ratio=decrease", "scale=720:1280:force_original_aspect_ratio=decrease", "-q:v 4", "posters/180x320.jpg", "posters/720x1280.jpg"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("no %q in %s", want, joined)
+		}
+	}
+	if got := strings.Count(joined, "-frames:v 1"); got != 2 {
+		t.Errorf("single frame per poster: %d of 2", got)
+	}
+	// A clip shorter than the poster time is seeked to its start.
+	if short := strings.Join(tr.buildThumbnailArgs("in.mp4", "posters", 0.8), " "); !strings.Contains(short, "-ss 0.000") {
+		t.Errorf("short clip: %s", short)
+	}
+}
 
-	if !strings.Contains(argsStr, "-ss 1.250") {
-		t.Error("Missing configured thumbnail seek time")
+func TestStreamInfoStatesTheRealStream(t *testing.T) {
+	got := streamInfo(&VideoInfo{Width: 1280, Height: 720, Rotation: 90, BitRate: 2000000, Profile: "High", Level: 31, AudioCodec: "aac"})
+	want := StreamInfo{Bandwidth: 2400000, Resolution: "720x1280", Codecs: "avc1.64001f,mp4a.40.2"}
+	if got != want {
+		t.Fatalf("streamInfo = %+v, want %+v", got, want)
 	}
-	if !strings.Contains(argsStr, "-frames:v 1") {
-		t.Error("Missing single-frame extraction")
-	}
-	if !strings.Contains(argsStr, "scale=180:320:force_original_aspect_ratio=decrease") {
-		t.Error("Missing cover crop thumbnail filter")
-	}
-	if !strings.Contains(argsStr, "-q:v 4") {
-		t.Error("Missing configured JPEG qscale")
-	}
-	if args[len(args)-1] != "/tmp/posters/180x320.jpg" {
-		t.Errorf("Output path = %q, want /tmp/posters/180x320.jpg", args[len(args)-1])
+	if got := streamInfo(&VideoInfo{Width: 640, Height: 360, Profile: "Constrained Baseline", Level: 30}); got.Codecs != "avc1.42e01e" || got.Bandwidth != 3000000 {
+		t.Fatalf("no sound, unknown bit rate: %+v", got)
 	}
 }
 
@@ -270,32 +79,101 @@ func TestThumbnailFilename(t *testing.T) {
 }
 
 func TestTranscodeMissingInput(t *testing.T) {
-	cfg := &config.VideoConfig{
-		SegmentDurationSec: 4,
-		Bitrates:           []string{"500k"},
-		FFmpegPath:         "ffmpeg",
-		FFprobePath:        "ffprobe",
-		TempDir:            t.TempDir(),
-		MaxDurationSec:     60,
-	}
-
-	tr := NewTranscoder(cfg)
-
-	_, err := tr.Transcode(context.Background(), "/nonexistent/input.mp4", t.TempDir())
-	if err == nil {
+	cfg := &config.VideoConfig{SegmentDurationSec: 4, FFmpegPath: "ffmpeg", FFprobePath: "ffprobe", MaxDurationSec: 60}
+	if _, err := NewTranscoder(cfg).Transcode(context.Background(), "/nonexistent/input.mp4", t.TempDir()); err == nil {
 		t.Error("Expected error for missing input file")
 	}
 }
 
 func TestProbeDurationInvalidPath(t *testing.T) {
-	cfg := &config.VideoConfig{
-		FFprobePath: "ffprobe",
-	}
-
-	tr := NewTranscoder(cfg)
-
-	_, err := tr.probeDuration(context.Background(), "/nonexistent/file.mp4")
-	if err == nil {
+	tr := NewTranscoder(&config.VideoConfig{FFprobePath: "ffprobe"})
+	if _, err := tr.probeDuration(context.Background(), "/nonexistent/file.mp4"); err == nil {
 		t.Error("Expected error for nonexistent file in probeDuration")
+	}
+}
+
+func needFFmpeg(t *testing.T) {
+	t.Helper()
+	for _, binary := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(binary); err != nil {
+			t.Skip(binary + " is not installed")
+		}
+	}
+}
+
+func remuxConfig() *config.VideoConfig {
+	return &config.VideoConfig{
+		SegmentDurationSec: 2, MaxDurationSec: 60, MaxSizeBytes: 100 << 20, MaxLongSide: 1280,
+		FFmpegPath: "ffmpeg", FFprobePath: "ffprobe", ThumbnailTimeSec: 0.5, ThumbnailQScale: 3,
+		ThumbnailVariants: []config.ImageVariant{{Key: "180x320", Width: 180, Height: 320}, {Key: "360x640", Width: 360, Height: 640}},
+	}
+}
+
+// A video as the browser compresses it - 720p H.264 + AAC MP4 - is cut into
+// segments that carry the same stream, with the posters, in a fraction of
+// its length. Needs ffmpeg and ffprobe, as in the storage image.
+func TestTranscodeRemuxesACompressedVideo(t *testing.T) {
+	needFFmpeg(t)
+	dir := t.TempDir()
+	input := filepath.Join(dir, "phone.mp4")
+	make := exec.Command("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=720x1280:rate=30", "-f", "lavfi", "-i", "sine=frequency=440",
+		"-t", "6", "-c:v", "libx264", "-preset", "veryfast", "-g", "60", "-pix_fmt", "yuv420p", "-c:a", "aac",
+		"-metadata", "location=+55.7558+037.6173/", input)
+	if out, err := make.CombinedOutput(); err != nil {
+		t.Fatalf("make fixture: %v %s", err, out)
+	}
+	cfg := remuxConfig()
+	if err := NewValidator(cfg).Validate(context.Background(), input, 1024); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	out := filepath.Join(dir, "out")
+	result, err := NewTranscoder(cfg).Transcode(ctx, input, out)
+	if err != nil {
+		t.Fatalf("transcode: %v", err)
+	}
+	if len(result.Variants) != 1 || result.Variants["medium"] == "" || result.Duration < 5.9 {
+		t.Fatalf("result %+v", result)
+	}
+	stream := result.Streams["medium"]
+	if stream.Resolution != "720x1280" || !strings.HasPrefix(stream.Codecs, "avc1.64") || !strings.HasSuffix(stream.Codecs, ",mp4a.40.2") {
+		t.Fatalf("stream info %+v", stream)
+	}
+	variant := result.Variants["medium"]
+	playlist, err := os.ReadFile(filepath.Join(variant, "playlist.m3u8"))
+	if err != nil || !strings.Contains(string(playlist), "seg_0.m4s") || !strings.Contains(string(playlist), "#EXT-X-MAP:URI=\"init.mp4\"") {
+		t.Fatalf("playlist: %v\n%s", err, playlist)
+	}
+	probe, err := exec.Command("ffprobe", "-v", "error", "-show_entries", "stream=codec_name,width,height:format_tags", "-of", "compact=p=0", filepath.Join(variant, "init.mp4")).Output()
+	if err != nil {
+		t.Fatalf("probe segment: %v", err)
+	}
+	if text := string(probe); !strings.Contains(text, "codec_name=h264|width=720|height=1280") || !strings.Contains(text, "codec_name=aac") || strings.Contains(text, "location") {
+		t.Fatalf("segment is not the copied stream, or keeps the location: %s", text)
+	}
+	for _, poster := range []string{"180x320.jpg", "360x640.jpg"} {
+		if _, err := os.Stat(filepath.Join(out, "posters", poster)); err != nil {
+			t.Fatalf("poster: %v", err)
+		}
+	}
+}
+
+// A browser recording that was not compressed - H.264 with Opus, VP9 WebM -
+// is refused by validation and never reaches ffmpeg as an encode.
+func TestBrowserRecordingsNeedCompression(t *testing.T) {
+	needFFmpeg(t)
+	for _, fixture := range []string{"browser-h264-opus.mp4", "browser-vp9-opus.webm"} {
+		t.Run(fixture, func(t *testing.T) {
+			input := filepath.Join("testdata", fixture)
+			cfg := remuxConfig()
+			err := NewValidator(cfg).Validate(context.Background(), input, 1024)
+			if validationError, ok := err.(*ValidationError); !ok || validationError.Code != "video_encoding_required" {
+				t.Fatalf("validate = %v, want video_encoding_required", err)
+			}
+			if _, err := NewTranscoder(cfg).Transcode(context.Background(), input, filepath.Join(t.TempDir(), "out")); err == nil {
+				t.Fatal("transcode accepted a stream it would have to encode")
+			}
+		})
 	}
 }

@@ -93,7 +93,10 @@ func main() {
 			RPS:   cfg.RateLimit.RPS,
 			Burst: cfg.RateLimit.Burst,
 		}),
-		middleware.AuthMiddleware(cfg.API.Keys, luaProvider),
+		middleware.AuthMiddlewareWithOptions(cfg.API.Keys, luaProvider, middleware.AuthOptions{
+			MediaSessions: handlers.MediaSessions(),
+			QueryTokens:   cfg.MediaGrants.QueryTokens,
+		}),
 	)
 
 	port := os.Getenv("SERVER_PORT")
@@ -102,7 +105,8 @@ func main() {
 	}
 
 	log.Printf("Server listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, wrapped); err != nil {
+	// The health check is answered ahead of the rate limit and authentication.
+	if err := http.ListenAndServe(":"+port, handler.WithHealth(wrapped)); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }

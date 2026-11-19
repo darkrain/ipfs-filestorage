@@ -48,6 +48,11 @@ func JPEGFilename(filename string) string {
 // so the stored original, every variant and the delivery link all carry a
 // format every browser can display.
 func (p *Processor) TranscodeHEIF(ctx context.Context, data []byte) ([]byte, error) {
+	release, err := acquireSlot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	dir, err := os.MkdirTemp("", "heif")
 	if err != nil {
 		return nil, fmt.Errorf("heif workspace: %w", err)

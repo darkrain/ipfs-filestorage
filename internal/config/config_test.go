@@ -15,7 +15,7 @@ func TestLoadDefaults(t *testing.T) {
 		"CORS_ALLOWED_ORIGINS", "CORS_ALLOWED_HEADERS",
 		"VIDEO_MAX_DURATION_SEC", "VIDEO_MAX_SIZE_MB",
 		"VIDEO_ASPECT_RATIO_TOLERANCE", "VIDEO_SEGMENT_DURATION_SEC",
-		"VIDEO_BITRATES", "FFMPEG_PATH", "FFPROBE_PATH", "VIDEO_TEMP_DIR",
+		"VIDEO_MAX_LONG_SIDE", "FFMPEG_PATH", "FFPROBE_PATH", "VIDEO_TEMP_DIR",
 		"IMAGE_BLUR_RADIUS", "IMAGE_FACE_BLUR_RADIUS", "IMAGE_FACE_DETECTION_MAX_DIMENSION",
 		"IMAGE_VARIANTS", "IMAGE_RESIZE_POLICY",
 		"IMAGE_FACE_DETECTION_SCORE_THRESHOLD", "IMAGE_FACE_DETECTION_NMS_THRESHOLD",
@@ -48,8 +48,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Video.SegmentDurationSec != 4 {
 		t.Errorf("Default Video.SegmentDurationSec = %d, want 4", cfg.Video.SegmentDurationSec)
 	}
-	if len(cfg.Video.Bitrates) != 3 {
-		t.Errorf("Default Video.Bitrates len = %d, want 3", len(cfg.Video.Bitrates))
+	if cfg.Video.MaxLongSide != 1280 {
+		t.Errorf("Default Video.MaxLongSide = %d, want 1280", cfg.Video.MaxLongSide)
 	}
 	if cfg.Video.FFmpegPath != "ffmpeg" {
 		t.Errorf("Default Video.FFmpegPath = %q, want ffmpeg", cfg.Video.FFmpegPath)
@@ -86,7 +86,7 @@ func TestLoadEnvOverrides(t *testing.T) {
 	t.Setenv("VIDEO_MAX_DURATION_SEC", "120")
 	t.Setenv("VIDEO_MAX_SIZE_MB", "50")
 	t.Setenv("VIDEO_SEGMENT_DURATION_SEC", "6")
-	t.Setenv("VIDEO_BITRATES", "800k,2000k")
+	t.Setenv("VIDEO_MAX_LONG_SIDE", "1920")
 	t.Setenv("FFMPEG_PATH", "/usr/bin/ffmpeg")
 	t.Setenv("FFPROBE_PATH", "/usr/bin/ffprobe")
 	t.Setenv("IMAGE_BLUR_RADIUS", "31")
@@ -115,11 +115,8 @@ func TestLoadEnvOverrides(t *testing.T) {
 	if cfg.Video.SegmentDurationSec != 6 {
 		t.Errorf("Video.SegmentDurationSec = %d, want 6", cfg.Video.SegmentDurationSec)
 	}
-	if len(cfg.Video.Bitrates) != 2 {
-		t.Errorf("Video.Bitrates len = %d, want 2", len(cfg.Video.Bitrates))
-	}
-	if cfg.Video.Bitrates[0] != "800k" {
-		t.Errorf("Video.Bitrates[0] = %q, want 800k", cfg.Video.Bitrates[0])
+	if cfg.Video.MaxLongSide != 1920 {
+		t.Errorf("Video.MaxLongSide = %d, want 1920", cfg.Video.MaxLongSide)
 	}
 	if cfg.Video.FFmpegPath != "/usr/bin/ffmpeg" {
 		t.Errorf("Video.FFmpegPath = %q, want /usr/bin/ffmpeg", cfg.Video.FFmpegPath)

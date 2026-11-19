@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"log"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,10 @@ type VideoResponse struct {
 	PosterAliases     map[string]map[string]string `json:"poster_aliases,omitempty"`
 	DurationSec       float64                      `json:"duration_sec"`
 	Status            string                       `json:"status"`
+	// Receipt binds the master to the encoder's output: the API records a
+	// video root only from it, so a text file uploaded as a "master" never
+	// becomes one (theGHub1/docs#152).
+	Receipt string `json:"receipt,omitempty"`
 }
 
 // clusterAdder адаптирует ipfs.Clusterer к интерфейсу video.IPFSAdder.
@@ -64,10 +69,12 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 
 	// Проверяем свободное место на диске (3x от максимального размера)
 	if err := os.MkdirAll(h.cfg.Video.TempDir, 0o755); err != nil {
+		logVideoUploadFailure(r, "create video work directory", err)
 		writeUploadError(w, r, http.StatusInternalServerError, "upload_storage_unavailable", nil)
 		return
 	}
 	if err := checkDiskSpace(h.cfg.Video.TempDir, h.cfg.Video.MaxSizeBytes*3); err != nil {
+		logVideoUploadFailure(r, "disk space", err)
 		writeUploadError(w, r, http.StatusInsufficientStorage, "upload_storage_unavailable", nil)
 		return
 	}
@@ -75,6 +82,7 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	// Сохраняем во временный файл с серверной проверкой размера
 	tmpInput, err := os.CreateTemp(h.cfg.Video.TempDir, "video-input-*.mp4")
 	if err != nil {
+		logVideoUploadFailure(r, "create input file", err)
 		writeUploadError(w, r, http.StatusInternalServerError, "upload_storage_unavailable", nil)
 		return
 	}
@@ -84,6 +92,7 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	// Серверная проверка размера: ограничиваем чтение через LimitReader
 	limitedReader := &countingReader{r: io.LimitReader(file, h.cfg.Video.MaxSizeBytes+1)}
 	if _, err := tmpInput.ReadFrom(limitedReader); err != nil {
+		logVideoUploadFailure(r, "read upload", err)
 		writeUploadError(w, r, http.StatusInternalServerError, "upload_failed", nil)
 		return
 	}
@@ -95,7 +104,7 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if !h.uploads.take(uploadSessionKey(r), limitedReader.bytesRead) {
+	if !h.uploads.allow(r, limitedReader.bytesRead) {
 		writeUploadError(w, r, http.StatusTooManyRequests, "upload_quota_exceeded", nil)
 		return
 	}
@@ -114,6 +123,9 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 			if validationError.MaxDurationSec > 0 {
 				details["max_duration_sec"] = validationError.MaxDurationSec
 			}
+			if validationError.MaxLongSide > 0 {
+				details["max_long_side"] = validationError.MaxLongSide
+			}
 			writeUploadError(w, r, http.StatusBadRequest, validationError.Code, details)
 			return
 		}
@@ -124,15 +136,18 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	// Транскодирование
 	outputDir, err := os.MkdirTemp(h.cfg.Video.TempDir, "video-output-*")
 	if err != nil {
+		logVideoUploadFailure(r, "create output directory", err)
 		writeUploadError(w, r, http.StatusInternalServerError, "upload_storage_unavailable", nil)
 		return
 	}
 	defer os.RemoveAll(outputDir)
 
-	// Videos queue for a transcoding slot, and a transcode that runs past its
-	// time is stopped instead of holding the slot for good.
+	// Videos queue for a slot to be cut into segments, and a run past its
+	// time is stopped instead of holding the slot for good. Nothing is
+	// encoded here any more (theGHub1/docs#201), so a slot is short.
 	release, err := acquireTranscodeSlot(ctx)
 	if err != nil {
+		logVideoUploadFailure(r, "wait for a transcoding slot", err)
 		writeUploadError(w, r, http.StatusServiceUnavailable, "upload_busy", nil)
 		return
 	}
@@ -142,18 +157,21 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	transcoder := video.NewTranscoder(&h.cfg.Video)
 	result, err := transcoder.Transcode(transcodeCtx, tmpInput.Name(), outputDir)
 	if err != nil {
+		logVideoUploadFailure(r, "transcode", err)
 		writeUploadError(w, r, http.StatusInternalServerError, "upload_failed", nil)
 		return
 	}
 	if err := h.buildVideoPrivacyPosters(ctx, outputDir); err != nil {
+		logVideoUploadFailure(r, "privacy posters", err)
 		writeUploadError(w, r, http.StatusInternalServerError, "upload_failed", nil)
 		return
 	}
 
 	// Загрузка в IPFS — через Clusterer → clusterAdder → video.IPFSAdder
-	uploader := video.NewUploader(&clusterAdder{cluster: h.cluster})
+	uploader := video.NewUploader(&clusterAdder{cluster: h.cluster}).WithStreams(result.Streams)
 	uploadResult, err := uploader.UploadDir(ctx, outputDir)
 	if err != nil {
+		logVideoUploadFailure(r, "add to IPFS", err)
 		writeUploadError(w, r, http.StatusServiceUnavailable, "upload_storage_unavailable", nil)
 		return
 	}
@@ -171,7 +189,22 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 		DurationSec:       result.Duration,
 		Status:            "processing_done",
 	}
+	resp.Receipt = h.uploadReceipt(r, "video", uploadResult.MasterCID, videoReceiptChildren(uploadResult))
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// logVideoUploadFailure says which step of a video upload failed. The upload
+// answered 500 upload_failed and logged nothing, so a recording that the
+// encoder could not take was invisible in the storage's log (theGHub1/docs#150).
+func logVideoUploadFailure(r *http.Request, step string, err error) {
+	message := "<nil>"
+	if err != nil {
+		message = err.Error()
+	}
+	if len(message) > 2000 {
+		message = message[:1000] + " … " + message[len(message)-1000:]
+	}
+	log.Printf("[UPLOAD-VIDEO] %s failed: %s", step, message)
 }
 
 // HandleStreamMaster обрабатывает GET /stream/{cid}/master.m3u8.
@@ -706,6 +739,31 @@ func (h *Handler) serveStreamAsset(w http.ResponseWriter, r *http.Request, cid, 
 	io.Copy(w, reader)
 }
 
+// videoReceiptChildren is everything the encoder wrote beside the master:
+// playlists, segments, posters and their privacy renditions.
+func videoReceiptChildren(result *video.UploadResult) []string {
+	seen := map[string]bool{result.MasterCID: true}
+	children := []string{}
+	add := func(cid string) {
+		if cid != "" && !seen[cid] {
+			seen[cid] = true
+			children = append(children, cid)
+		}
+	}
+	for _, cid := range result.AllCIDs {
+		add(cid)
+	}
+	for _, cid := range result.PosterCIDs {
+		add(cid)
+	}
+	for _, variants := range result.PrivacyPosterCIDs {
+		for _, cid := range variants {
+			add(cid)
+		}
+	}
+	return children
+}
+
 func videoPosterAliases(posters map[string]string, privacy map[string]map[string]string) map[string]map[string]string {
 	aliases := make(map[string]map[string]string)
 	for size, original := range posters {
@@ -774,6 +832,11 @@ func playlistAuthSuffix(query url.Values) string {
 	}
 	if mediaLink := query.Get("media_link"); mediaLink != "" {
 		values.Set("media_link", mediaLink)
+	}
+	// The player fetches the playlists and parts itself: they carry the
+	// viewer's sealed media session on, never the session token.
+	if session := query.Get("media_session"); session != "" {
+		values.Set("media_session", session)
 	}
 	if len(values) == 0 {
 		return ""

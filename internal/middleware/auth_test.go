@@ -41,7 +41,7 @@ func TestAuthMiddleware_BearerToken(t *testing.T) {
 }
 
 func TestAuthMiddleware_QueryToken(t *testing.T) {
-	handler := AuthMiddleware([]string{"mytoken"}, nil)(testOkHandler())
+	handler := AuthMiddlewareWithOptions([]string{"mytoken"}, nil, AuthOptions{QueryTokens: true})(testOkHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/file/Qm123?token=mytoken", nil)
 	rr := httptest.NewRecorder()
@@ -53,7 +53,7 @@ func TestAuthMiddleware_QueryToken(t *testing.T) {
 }
 
 func TestAuthMiddleware_QueryAccessToken(t *testing.T) {
-	handler := AuthMiddleware([]string{"mytoken"}, nil)(testOkHandler())
+	handler := AuthMiddlewareWithOptions([]string{"mytoken"}, nil, AuthOptions{QueryTokens: true})(testOkHandler())
 
 	req := httptest.NewRequest(http.MethodGet, "/file/Qm123?access_token=mytoken", nil)
 	rr := httptest.NewRecorder()

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/borg001/ipfs-filestorage/internal/config"
@@ -53,6 +54,31 @@ type mediaAccessResolver struct {
 	cidEndpoint  *url.URL
 	linkEndpoint *url.URL
 	client       *http.Client
+	// callerProof proves to the policy that the storage asks: only then does
+	// it answer a blurred decision with the locators of the file
+	// (theGHub1/docs#152). Nil without media grant keys.
+	callerProof func() string
+}
+
+// policyCallerProof seals a proof with the media grant keys and renews it
+// well before it expires.
+func policyCallerProof(codec *mediagrant.Codec) func() string {
+	var mu sync.Mutex
+	var value string
+	var renewAt time.Time
+	return func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		now := time.Now()
+		if value == "" || !now.Before(renewAt) {
+			sealed, err := codec.SealPolicyCaller(now)
+			if err != nil {
+				return value
+			}
+			value, renewAt = sealed, now.Add(mediagrant.PolicyCallerTTL/3)
+		}
+		return value
+	}
 }
 
 type mediaDeliveryDecision struct {
@@ -164,6 +190,11 @@ func (r *mediaAccessResolver) resolve(ctx context.Context, source *http.Request,
 		return mediaDeliveryDecision{}, fmt.Errorf("create media policy request: %w", err)
 	}
 	forwardMediaAuthorization(req, source)
+	if r.callerProof != nil {
+		if proof := r.callerProof(); proof != "" {
+			req.Header.Set(mediagrant.PolicyCallerHeader, proof)
+		}
+	}
 
 	response, err := r.client.Do(req)
 	if err != nil {
@@ -225,7 +256,12 @@ func (r *mediaAccessResolver) resolve(ctx context.Context, source *http.Request,
 		if decision.SourceCID == "" {
 			decision.SourceCID = mediaStorageCID(row["storage_uri"])
 			sourceURI, _ := responseString(row["storage_uri"])
-			decision.SourceIsVideo = strings.HasPrefix(sourceURI, "video://")
+			// A master is trusted to name its posters and parts only when the
+			// API vouches that the encoder wrote it. The video:// scheme is
+			// written by whoever registers the file, and a text file
+			// registered as one listed another user's photo as its poster
+			// and served it unblurred (theGHub1/docs#152).
+			decision.SourceIsVideo = strings.HasPrefix(sourceURI, "video://") && responseBool(row["video_root"])
 		}
 		if decision.PosterCID == "" {
 			decision.PosterCID = mediaStorageCID(row["poster_uri"])
@@ -268,6 +304,17 @@ func responseMap(value interface{}) (map[string]interface{}, bool) {
 		}
 	}
 	return nil, false
+}
+
+func responseBool(value interface{}) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case map[string]interface{}:
+		return responseBool(typed["value"])
+	default:
+		return false
+	}
 }
 
 func responseString(value interface{}) (string, bool) {

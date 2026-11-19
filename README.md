@@ -78,12 +78,16 @@ POST /upload → storage1 → ClusterAdd(payload)
 
 ### Видео-стриминг
 
-Загруженное видео проходит через ffmpeg и разбивается на HLS/CMAF-чанки с тремя уровнями качества:
+Браузер сжимает видео перед загрузкой (H.264 + AAC в MP4, не больше 720p).
+Хранилище его не перекодирует: ffmpeg только режет поток на HLS/CMAF-сегменты
+(`-c copy`) и снимает один кадр для постеров. Раздача и проверка здоровья не
+делят процессор с кодировщиком (theGHub1/docs#201). Видео, загруженные раньше
+с тремя качествами, отдаются как прежде.
 
 ```
 POST /upload-video (video.mp4)
-  ├→ validate: ffprobe — размер, длительность ≤40 мин. (2400 с), пропорции 9:16
-  ├→ transcode: ffmpeg — poster JPEG + 3 варианта (low/medium/high), fMP4 CMAF
+  ├→ validate: ffprobe — размер, длительность, MP4 + H.264 8 бит 4:2:0 + AAC/без звука, длинная сторона ≤1280
+  ├→ remux: ffmpeg -c copy — один вариант HLS fMP4 CMAF + постеры из одного кадра
   ├→ privacy posters: blur + blur_faces локальным face detector
   ├→ upload: каждый чанк → IPFS → CID
   ├→ rewrite: плейлисты переписываются — ссылки на CID
@@ -377,10 +381,10 @@ docker compose up --build -d
 | `VIDEO_MAX_SIZE_MB` | `1024` | Максимальный размер видеофайла (МБ) |
 | `VIDEO_ASPECT_RATIO_TOLERANCE` | `0.1` | Допуск пропорций от 9:16 (0.1 = ±10%); при проверке учитывается `rotate`/Display Matrix из видео телефона |
 | `VIDEO_SEGMENT_DURATION_SEC` | `4` | Длительность HLS-сегмента (секунд) |
-| `VIDEO_BITRATES` | `500k,1500k,4000k` | Битрейты для low/medium/high вариантов |
+| `VIDEO_MAX_LONG_SIDE` | `1280` | Наибольшая длинная сторона кадра. Браузер сжимает видео до 720p (H.264 + AAC в MP4) перед загрузкой; хранилище не перекодирует, а только режет на HLS-сегменты без перекодирования (`-c copy`). Другое видео отклоняется с `video_encoding_required` или `video_resolution_too_large` |
 | `FFMPEG_PATH` | `ffmpeg` | Путь к бинарнику ffmpeg |
 | `FFPROBE_PATH` | `ffprobe` | Путь к бинарнику ffprobe |
-| `VIDEO_TEMP_DIR` | `/tmp/video_processing` | Директория для временных файлов транскодирования |
+| `VIDEO_TEMP_DIR` | `/tmp/video_processing` | Директория для временных файлов нарезки видео |
 | `VIDEO_THUMBNAIL_VARIANTS` | `180x320,360x640,720x1280` | Размеры poster JPEG для видео |
 | `VIDEO_THUMBNAIL_TIME_SEC` | `1.0` | Секунда видео для генерации poster |
 | `VIDEO_THUMBNAIL_QSCALE` | `3` | Качество JPEG poster для ffmpeg |
@@ -579,7 +583,7 @@ GET /stream/{masterCID}/master.m3u8
 Authorization: Bearer SECRET_KEY_1
 ```
 
-Возвращает мастер-плейлист HLS с тремя уровнями качества.
+Возвращает мастер-плейлист HLS: один вариант у нового видео, до трёх у загруженного раньше.
 
 ```http
 GET /stream/segment/{cid}.m3u8
@@ -658,7 +662,7 @@ YuNet-покрытие включает портрет с одним лицом,
 | `internal/ipfs` | Cluster Add/Replicate/Cat/Unpin, Stat (DAG size), countingReader |
 | `internal/middleware` | PanicRecovery, CORS, Chain, Lua fallback, context |
 | `internal/store` | AddGroup/GetGroup/RemoveGroup, concurrent access (50 горутин), persistence, legacy format |
-| `internal/video` | Validator (size, duration, aspect ratio, probe error), Uploader (rewrite playlists, CID substitution, master playlist), Transcoder (HLS args, bitrate params, segment naming) |
+| `internal/video` | Validator (size, duration, aspect ratio, probe error), Uploader (rewrite playlists, CID substitution, master playlist), Transcoder (remux args, poster frame, segment naming) |
 
 ### Интеграционные тесты
 
@@ -709,7 +713,7 @@ internal/
   middleware/         — Auth (static + Lua fallback), CORS, логирование
   store/              — UnpinStore: файловый store + GC-воркер + группы
   video/
-    transcoder.go    — ffmpeg: транскодирование → HLS/CMAF (3 качества)
+    transcoder.go    — ffmpeg: нарезка без перекодирования → HLS/CMAF, постеры из одного кадра
     validator.go     — ffprobe: валидация (размер, длительность, 9:16)
     uploader.go      — загрузка чанков в IPFS, переписывание плейлистов
 tests/
