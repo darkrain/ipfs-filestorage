@@ -17,6 +17,17 @@ func (m *mockProber) Probe(ctx context.Context, inputPath string) (*VideoInfo, e
 	return m.info, m.err
 }
 
+// playable is a video as the browser compresses it: MP4, H.264 High, AAC.
+func playable(info VideoInfo) *VideoInfo {
+	info.FormatName = "mov,mp4,m4a,3gp,3g2,mj2"
+	info.CodecName = "h264"
+	info.PixFmt = "yuv420p"
+	info.Profile = "High"
+	info.Level = 31
+	info.AudioCodec = "aac"
+	return &info
+}
+
 func TestValidateFileSizeTooLarge(t *testing.T) {
 	cfg := &config.VideoConfig{
 		MaxSizeBytes:   10 * 1024 * 1024,
@@ -37,7 +48,7 @@ func TestValidateFileSizeAtLimit(t *testing.T) {
 		MaxDurationSec: 60,
 	}
 	v := &Validator{cfg: cfg, prober: &mockProber{
-		info: &VideoInfo{Duration: 5, Width: 1080, Height: 1920},
+		info: playable(VideoInfo{Duration: 5, Width: 720, Height: 1280}),
 	}}
 
 	err := v.Validate(context.Background(), "/some/file.mp4", 10*1024*1024)
@@ -52,7 +63,7 @@ func TestValidateDurationTooLong(t *testing.T) {
 		MaxDurationSec: 30,
 	}
 	v := &Validator{cfg: cfg, prober: &mockProber{
-		info: &VideoInfo{Duration: 60, Width: 1080, Height: 1920},
+		info: playable(VideoInfo{Duration: 60, Width: 720, Height: 1280}),
 	}}
 
 	err := v.Validate(context.Background(), "/some/file.mp4", 1024)
@@ -68,7 +79,7 @@ func TestValidateDurationAtLimit(t *testing.T) {
 		MaxDurationSec: 30,
 	}
 	v := &Validator{cfg: cfg, prober: &mockProber{
-		info: &VideoInfo{Duration: 30, Width: 1080, Height: 1920},
+		info: playable(VideoInfo{Duration: 30, Width: 720, Height: 1280}),
 	}}
 
 	err := v.Validate(context.Background(), "/some/file.mp4", 1024)
@@ -86,12 +97,12 @@ func TestValidateAcceptsEveryShape(t *testing.T) {
 		name string
 		info *VideoInfo
 	}{
-		{name: "vertical", info: &VideoInfo{Duration: 10, Width: 1080, Height: 1920}},
-		{name: "square", info: &VideoInfo{Duration: 10, Width: 1080, Height: 1080}},
-		{name: "landscape", info: &VideoInfo{Duration: 10, Width: 1920, Height: 1080}},
-		{name: "wide", info: &VideoInfo{Duration: 10, Width: 1080, Height: 566}},
-		{name: "rotated by a phone", info: &VideoInfo{Duration: 10, Width: 1920, Height: 1080, Rotation: 90}},
-		{name: "dimensions unknown", info: &VideoInfo{Duration: 10}},
+		{name: "vertical", info: playable(VideoInfo{Duration: 10, Width: 720, Height: 1280})},
+		{name: "square", info: playable(VideoInfo{Duration: 10, Width: 720, Height: 720})},
+		{name: "landscape", info: playable(VideoInfo{Duration: 10, Width: 1280, Height: 720})},
+		{name: "wide", info: playable(VideoInfo{Duration: 10, Width: 1280, Height: 670})},
+		{name: "rotated by a phone", info: playable(VideoInfo{Duration: 10, Width: 1280, Height: 720, Rotation: 90})},
+		{name: "dimensions unknown", info: playable(VideoInfo{Duration: 10})},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			v := &Validator{cfg: cfg, prober: &mockProber{info: testCase.info}}
@@ -123,7 +134,7 @@ func TestWithProber(t *testing.T) {
 	}
 	v := NewValidator(cfg)
 	mock := &mockProber{
-		info: &VideoInfo{Duration: 5, Width: 1080, Height: 1920},
+		info: playable(VideoInfo{Duration: 5, Width: 720, Height: 1280}),
 	}
 	v.WithProber(mock)
 

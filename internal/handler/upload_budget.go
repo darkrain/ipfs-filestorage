@@ -85,17 +85,18 @@ func uploadSessionKey(r *http.Request) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-// transcodeSlots is how many videos this instance transcodes at once. Every
-// upload started its own ffmpeg with no limit, so a few long videos took both
-// cores and everything else waited.
+// transcodeSlots is how many videos this instance cuts into HLS segments at
+// once. Every upload started its own ffmpeg with no limit, so a few long
+// videos took both cores and everything else waited. The browser now
+// compresses the video and ffmpeg only copies its streams (theGHub1/docs#201).
 var transcodeSlots = make(chan struct{}, 2)
 
 // errTranscodeBusy is an upload that waited too long for a slot.
 var errTranscodeBusy = errors.New("transcoding is busy")
 
 const (
-	transcodeQueueWait = 5 * time.Minute
-	transcodeTimeout   = 20 * time.Minute
+	transcodeQueueWait = 2 * time.Minute
+	transcodeTimeout   = 3 * time.Minute
 )
 
 // acquireTranscodeSlot waits for a free slot, as long as the upload is alive

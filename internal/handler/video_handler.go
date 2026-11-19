@@ -123,6 +123,9 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 			if validationError.MaxDurationSec > 0 {
 				details["max_duration_sec"] = validationError.MaxDurationSec
 			}
+			if validationError.MaxLongSide > 0 {
+				details["max_long_side"] = validationError.MaxLongSide
+			}
 			writeUploadError(w, r, http.StatusBadRequest, validationError.Code, details)
 			return
 		}
@@ -139,8 +142,9 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.RemoveAll(outputDir)
 
-	// Videos queue for a transcoding slot, and a transcode that runs past its
-	// time is stopped instead of holding the slot for good.
+	// Videos queue for a slot to be cut into segments, and a run past its
+	// time is stopped instead of holding the slot for good. Nothing is
+	// encoded here any more (theGHub1/docs#201), so a slot is short.
 	release, err := acquireTranscodeSlot(ctx)
 	if err != nil {
 		logVideoUploadFailure(r, "wait for a transcoding slot", err)
@@ -164,7 +168,7 @@ func (h *Handler) HandleUploadVideo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Загрузка в IPFS — через Clusterer → clusterAdder → video.IPFSAdder
-	uploader := video.NewUploader(&clusterAdder{cluster: h.cluster})
+	uploader := video.NewUploader(&clusterAdder{cluster: h.cluster}).WithStreams(result.Streams)
 	uploadResult, err := uploader.UploadDir(ctx, outputDir)
 	if err != nil {
 		logVideoUploadFailure(r, "add to IPFS", err)

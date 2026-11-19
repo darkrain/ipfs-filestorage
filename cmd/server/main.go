@@ -105,7 +105,8 @@ func main() {
 	}
 
 	log.Printf("Server listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, wrapped); err != nil {
+	// The health check is answered ahead of the rate limit and authentication.
+	if err := http.ListenAndServe(":"+port, handler.WithHealth(wrapped)); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }

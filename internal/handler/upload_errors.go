@@ -58,8 +58,10 @@ func localizedUploadMessage(locale, code string, details map[string]any) string 
 			return "Лимит загрузок на сегодня исчерпан. Попробуйте завтра."
 		case "upload_busy":
 			return "Сейчас обрабатывается много видео. Повторите загрузку через несколько минут."
-		case "video_resolution_exceeded":
-			return "Разрешение видео слишком большое: не больше 4096 точек по стороне и 120 кадров в секунду."
+		case "video_encoding_required":
+			return "Видео нужно сжать перед загрузкой: подходит MP4 с H.264 и AAC. Обновите страницу и попробуйте снова."
+		case "video_resolution_too_large":
+			return fmt.Sprintf("Разрешение видео больше 720p: не больше %d точек по длинной стороне и 60 кадров в секунду. Обновите страницу и попробуйте снова.", maxLongSide(details))
 		default:
 			return "Не удалось загрузить файл. Повторите попытку."
 		}
@@ -86,11 +88,20 @@ func localizedUploadMessage(locale, code string, details map[string]any) string 
 		return "Today's upload limit is used up. Try again tomorrow."
 	case "upload_busy":
 		return "Many videos are being processed. Try the upload again in a few minutes."
-	case "video_resolution_exceeded":
-		return "The video resolution is too high: at most 4096 pixels a side and 120 frames per second."
+	case "video_encoding_required":
+		return "The video has to be compressed before upload: MP4 with H.264 and AAC. Reload the page and try again."
+	case "video_resolution_too_large":
+		return fmt.Sprintf("The video is larger than 720p: at most %d pixels on the long side and 60 frames per second. Reload the page and try again.", maxLongSide(details))
 	default:
 		return "The file could not be uploaded. Try again."
 	}
+}
+
+func maxLongSide(details map[string]any) int64 {
+	if side := numberDetail(details, "max_long_side"); side > 0 {
+		return side
+	}
+	return 1280
 }
 
 func numberDetail(details map[string]any, key string) int64 {

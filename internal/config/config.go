@@ -181,8 +181,9 @@ type VideoConfig struct {
 	// Допустимое отклонение от пропорции 9:16
 	// Длительность одного чанка (сек)
 	SegmentDurationSec int
-	// Список битрейтов для адаптивного стриминга (напр. ["500k","1500k","4000k"])
-	Bitrates []string
+	// MaxLongSide is the longest frame side accepted (VIDEO_MAX_LONG_SIDE,
+	// 1280): the browser compresses a video to 720p before it is uploaded.
+	MaxLongSide int
 	// Путь к бинарнику ffmpeg
 	FFmpegPath string
 	// Путь к бинарнику ffprobe
@@ -193,8 +194,6 @@ type VideoConfig struct {
 	ThumbnailVariants []ImageVariant
 	// Время кадра для превью (сек)
 	ThumbnailTimeSec float64
-	// FFmpegThreads bounds the threads of each encoder (VIDEO_FFMPEG_THREADS).
-	FFmpegThreads int
 	// JPEG qscale для ffmpeg (1 лучше, 31 хуже)
 	ThumbnailQScale int
 }
@@ -328,7 +327,7 @@ func Load() *Config {
 			MaxDurationSec:     getEnvInt("VIDEO_MAX_DURATION_SEC", 2400),
 			MaxSizeBytes:       getEnvInt64("VIDEO_MAX_SIZE_MB", 1024) * 1024 * 1024,
 			SegmentDurationSec: getEnvInt("VIDEO_SEGMENT_DURATION_SEC", 4),
-			Bitrates:           getEnvSlice("VIDEO_BITRATES", []string{"500k", "1500k", "4000k"}),
+			MaxLongSide:        clampInt(getEnvInt("VIDEO_MAX_LONG_SIDE", 1280), 160, 4096),
 			FFmpegPath:         validateBinaryPath(getEnv("FFMPEG_PATH", "ffmpeg"), "ffmpeg"),
 			FFprobePath:        validateBinaryPath(getEnv("FFPROBE_PATH", "ffprobe"), "ffprobe"),
 			TempDir:            getEnv("VIDEO_TEMP_DIR", "/tmp/video_processing"),
@@ -338,7 +337,6 @@ func Load() *Config {
 				{Key: "720x1280", Width: 720, Height: 1280},
 			}),
 			ThumbnailTimeSec: getEnvFloat("VIDEO_THUMBNAIL_TIME_SEC", 1.0),
-			FFmpegThreads:    clampInt(getEnvInt("VIDEO_FFMPEG_THREADS", 2), 1, 16),
 			ThumbnailQScale:  clampInt(getEnvInt("VIDEO_THUMBNAIL_QSCALE", 3), 1, 31),
 		},
 		Auth: AuthConfig{

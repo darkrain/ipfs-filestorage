@@ -20,6 +20,15 @@ type VideoInfo struct {
 	CodecName string  `json:"codec_name"`
 	FrameRate float64 `json:"frame_rate"`
 	BitRate   int64   `json:"bit_rate"`
+	// FormatName is ffprobe's demuxer list, "mov,mp4,m4a,3gp,3g2,mj2" for MP4.
+	FormatName string `json:"format_name"`
+	// PixFmt, Profile and Level describe the H.264 stream: the master
+	// playlist states them, and a browser has to be able to decode them.
+	PixFmt  string `json:"pix_fmt"`
+	Profile string `json:"profile"`
+	Level   int    `json:"level"`
+	// AudioCodec is the first audio stream's codec; empty without audio.
+	AudioCodec string `json:"audio_codec"`
 }
 
 // ValidationError describes a rejected input without exposing an ffprobe or
@@ -29,6 +38,7 @@ type ValidationError struct {
 	Code           string
 	MaxSizeBytes   int64
 	MaxDurationSec int
+	MaxLongSide    int
 }
 
 func (e *ValidationError) Error() string {
@@ -64,8 +74,12 @@ func (v *Validator) WithProber(p VideoProber) *Validator {
 }
 
 // Validate проверяет видео на соответствие требованиям:
-// - размер файла ≤ MaxSizeBytes
-// - длительность ≤ MaxDurationSec
+//   - размер файла ≤ MaxSizeBytes;
+//   - длительность ≤ MaxDurationSec;
+//   - MP4 с H.264 (8 бит, 4:2:0) и AAC или без звука: браузер сжимает видео
+//     перед загрузкой, хранилище его больше не перекодирует, а только режет
+//     на сегменты HLS (theGHub1/docs#201);
+//   - длинная сторона ≤ MaxLongSide (720p), не больше 60 кадров в секунду.
 //
 // The shape of the frame is not one of them. A publication carries the frame
 // it is shown in, chosen when it is composed, so a video is accepted as it was
@@ -83,19 +97,51 @@ func (v *Validator) Validate(ctx context.Context, inputPath string, fileSize int
 	if info.Duration > float64(v.cfg.MaxDurationSec) {
 		return &ValidationError{Code: "video_duration_exceeded", MaxDurationSec: v.cfg.MaxDurationSec}
 	}
-	// A frame larger than 4K or faster than 120 fps costs a transcode far
-	// beyond what a phone records.
-	if info.Width > maxVideoSide || info.Height > maxVideoSide || info.FrameRate > maxVideoFrameRate {
-		return &ValidationError{Code: "video_resolution_exceeded"}
+	if !BrowserPlayable(info) {
+		return &ValidationError{Code: "video_encoding_required"}
+	}
+	if max(info.Width, info.Height) > v.maxLongSide() || info.FrameRate > maxVideoFrameRate {
+		return &ValidationError{Code: "video_resolution_too_large", MaxLongSide: v.maxLongSide()}
 	}
 
 	return nil
 }
 
 const (
-	maxVideoSide      = 4096
-	maxVideoFrameRate = 120
+	defaultMaxLongSide = 1280
+	maxVideoFrameRate  = 60
 )
+
+func (v *Validator) maxLongSide() int {
+	if v.cfg.MaxLongSide > 0 {
+		return v.cfg.MaxLongSide
+	}
+	return defaultMaxLongSide
+}
+
+// BrowserPlayable says the stream can be cut into HLS segments as it is and
+// played by every browser: an MP4 with 8-bit 4:2:0 H.264 and AAC or no audio.
+// Anything else (HEVC from an iPhone, VP8/VP9 or Opus from a recording, H.264
+// High 10) would need a transcode, which the storage no longer runs.
+func BrowserPlayable(info *VideoInfo) bool {
+	if info == nil || !strings.Contains(","+info.FormatName+",", ",mp4,") {
+		return false
+	}
+	if info.CodecName != "h264" {
+		return false
+	}
+	switch info.PixFmt {
+	case "yuv420p", "yuvj420p":
+	default:
+		return false
+	}
+	switch info.Profile {
+	case "Baseline", "Constrained Baseline", "Main", "High":
+	default:
+		return false
+	}
+	return info.AudioCodec == "" || info.AudioCodec == "aac"
+}
 
 // Probe получает метаданные видео через ffprobe.
 func (v *Validator) Probe(ctx context.Context, inputPath string) (*VideoInfo, error) {
@@ -108,7 +154,6 @@ func (v *Validator) Probe(ctx context.Context, inputPath string) (*VideoInfo, er
 func probeVideoInfo(ctx context.Context, ffprobePath, inputPath string) (*VideoInfo, error) {
 	cmd := exec.CommandContext(ctx, ffprobePath,
 		"-v", "error",
-		"-select_streams", "v:0",
 		"-show_streams",
 		"-show_format",
 		"-of", "json",
@@ -120,10 +165,18 @@ func probeVideoInfo(ctx context.Context, ffprobePath, inputPath string) (*VideoI
 	}
 	var result struct {
 		Format struct {
-			Duration string `json:"duration"`
-			BitRate  string `json:"bit_rate"`
+			Duration   string `json:"duration"`
+			BitRate    string `json:"bit_rate"`
+			FormatName string `json:"format_name"`
 		} `json:"format"`
 		Streams []struct {
+			CodecType   string `json:"codec_type"`
+			Disposition struct {
+				AttachedPic int `json:"attached_pic"`
+			} `json:"disposition"`
+			PixFmt    string `json:"pix_fmt"`
+			Profile   string `json:"profile"`
+			Level     int    `json:"level"`
 			Duration  string `json:"duration"`
 			Width     int    `json:"width"`
 			Height    int    `json:"height"`
@@ -140,11 +193,25 @@ func probeVideoInfo(ctx context.Context, ffprobePath, inputPath string) (*VideoI
 	if err := json.Unmarshal(out, &result); err != nil {
 		return nil, fmt.Errorf("parse ffprobe output: %w", err)
 	}
-	if len(result.Streams) == 0 {
+	videoStream, audioCodec := -1, ""
+	for i, candidate := range result.Streams {
+		switch candidate.CodecType {
+		case "video":
+			// Cover art is stored as a one-frame video stream; it is not the video.
+			if videoStream < 0 && candidate.Disposition.AttachedPic == 0 {
+				videoStream = i
+			}
+		case "audio":
+			if audioCodec == "" {
+				audioCodec = candidate.CodecName
+			}
+		}
+	}
+	if videoStream < 0 {
 		return nil, fmt.Errorf("no video streams found")
 	}
 
-	stream := result.Streams[0]
+	stream := result.Streams[videoStream]
 	duration := result.Format.Duration
 	if duration == "" {
 		duration = stream.Duration
@@ -175,6 +242,12 @@ func probeVideoInfo(ctx context.Context, ffprobePath, inputPath string) (*VideoI
 		CodecName: stream.CodecName,
 		FrameRate: frameRate,
 		BitRate:   bitRate,
+
+		FormatName: result.Format.FormatName,
+		PixFmt:     stream.PixFmt,
+		Profile:    stream.Profile,
+		Level:      stream.Level,
+		AudioCodec: audioCodec,
 	}, nil
 }
 
