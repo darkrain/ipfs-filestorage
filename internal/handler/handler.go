@@ -112,6 +112,9 @@ func NewHandler(cfg *config.Config) *Handler {
 	return h
 }
 
+// Cluster is the IPFS cluster the handler reads from.
+func (h *Handler) Cluster() ipfs.Clusterer { return h.cluster }
+
 func (h *Handler) replicateAsync(cid string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
