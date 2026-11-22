@@ -23,6 +23,26 @@ type Config struct {
 	MediaAccess MediaAccessConfig
 	MediaGrants MediaGrantConfig
 	RateLimit   RateLimitConfig
+	PublicMedia PublicMediaConfig
+}
+
+// PublicMediaConfig configures public media packages (internal/publicmedia):
+// films for the platform's own sites, served without an account. Off while
+// PUBLIC_MEDIA_PACKAGES is empty.
+type PublicMediaConfig struct {
+	// Packages maps a name to a directory CID: PUBLIC_MEDIA_PACKAGES=first=bafy…,model=bafy…
+	Packages map[string]string
+	// Origins are the sites allowed to play them (PUBLIC_MEDIA_ORIGINS).
+	Origins []string
+	// LinkTTL is the life of a signed link (PUBLIC_MEDIA_LINK_TTL, 45m).
+	LinkTTL time.Duration
+	// SigningKey signs the links (PUBLIC_MEDIA_SIGNING_KEY, base64 of >= 32 bytes).
+	SigningKey string
+	// AllowNoOrigin accepts requests naming no site: Safari's native HLS
+	// player (PUBLIC_MEDIA_ALLOW_NO_ORIGIN, true).
+	AllowNoOrigin bool
+	// Its own per-client limit, apart from the authenticated routes'.
+	RateLimit RateLimitConfig
 }
 
 type ServerConfig struct {
@@ -369,7 +389,35 @@ func Load() *Config {
 			RPS:   getEnvFloat("RATE_LIMIT_RPS", 100),
 			Burst: getEnvInt("RATE_LIMIT_BURST", 200),
 		},
+		PublicMedia: PublicMediaConfig{
+			Packages:      getEnvMap("PUBLIC_MEDIA_PACKAGES"),
+			Origins:       getEnvSlice("PUBLIC_MEDIA_ORIGINS", nil),
+			LinkTTL:       getEnvDuration("PUBLIC_MEDIA_LINK_TTL", 45*time.Minute),
+			SigningKey:    os.Getenv("PUBLIC_MEDIA_SIGNING_KEY"),
+			AllowNoOrigin: getEnvBool("PUBLIC_MEDIA_ALLOW_NO_ORIGIN", true),
+			// A film start is a master, a variant, an init and a few
+			// segments; a change of quality adds a variant and an init.
+			RateLimit: RateLimitConfig{
+				RPS:   getEnvFloat("PUBLIC_MEDIA_RATE_LIMIT_RPS", 20),
+				Burst: getEnvInt("PUBLIC_MEDIA_RATE_LIMIT_BURST", 80),
+			},
+		},
 	}
+}
+
+// getEnvMap reads name=value pairs separated by commas. A malformed pair
+// keeps its whole text as the name, so validation refuses it loudly.
+func getEnvMap(key string) map[string]string {
+	result := map[string]string{}
+	for _, pair := range getEnvSlice(key, nil) {
+		name, value, ok := strings.Cut(pair, "=")
+		if !ok {
+			result[pair] = ""
+			continue
+		}
+		result[strings.TrimSpace(name)] = strings.TrimSpace(value)
+	}
+	return result
 }
 
 // validateBinaryPath accepts a binary name or an absolute path, but rejects traversal.

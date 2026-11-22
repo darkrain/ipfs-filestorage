@@ -66,8 +66,48 @@ func (p *Processor) Close() {
 // decoder allocate gigabytes. A hundred megapixels is above any phone camera.
 const MaxDecodePixels = 100_000_000
 
-// ErrImageTooLarge is a picture whose dimensions exceed MaxDecodePixels.
+// MaxDecodeBytes bounds the memory one full decode takes. The pixel limit
+// alone let a 16-bit PNG of a hundred megapixels decode into 800 MB, more
+// than half the storage container (theGHub1/docs#180); four bytes a pixel at
+// the pixel limit is an ordinary 8-bit RGBA picture.
+const MaxDecodeBytes = 4 * MaxDecodePixels
+
+// ErrImageTooLarge is a picture whose dimensions exceed MaxDecodePixels, or
+// whose decode would take more than MaxDecodeBytes.
 var ErrImageTooLarge = fmt.Errorf("image dimensions exceed %d pixels", MaxDecodePixels)
+
+// checkDecodable refuses, from the header alone, a picture whose full decode
+// is over the pixel or memory limit.
+func checkDecodable(cfg image.Config) error {
+	// Each side is checked first so the product cannot overflow.
+	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > MaxDecodePixels || cfg.Height > MaxDecodePixels {
+		return ErrImageTooLarge
+	}
+	pixels := int64(cfg.Width) * int64(cfg.Height)
+	if pixels > MaxDecodePixels || pixels*decodedBytesPerPixel(cfg.ColorModel) > MaxDecodeBytes {
+		return ErrImageTooLarge
+	}
+	return nil
+}
+
+// decodedBytesPerPixel is what the standard decoders allocate per pixel for
+// a colour model; YCbCr counts as 4:4:4, its largest subsampling.
+func decodedBytesPerPixel(model color.Model) int64 {
+	switch model {
+	case color.RGBA64Model, color.NRGBA64Model:
+		return 8
+	case color.Gray16Model:
+		return 2
+	case color.GrayModel, color.AlphaModel:
+		return 1
+	case color.YCbCrModel:
+		return 3
+	}
+	if _, ok := model.(color.Palette); ok {
+		return 1
+	}
+	return 4
+}
 
 // FitPreview keeps the complete photograph while limiting its longest side.
 // It is used for feed display; opening the photograph still requests original.
@@ -79,41 +119,50 @@ func (p *Processor) FitPreview(ctx context.Context, data []byte, maxSide int) ([
 // using the same configured geometry as upload-time variants. It never detects
 // faces again or substitutes original bytes for the supplied source.
 func (p *Processor) ConfiguredPreview(ctx context.Context, data []byte, variant config.ImageVariant) ([]byte, error) {
+	src, release, err := p.decodePreviewSource(ctx, data, variant)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return p.previewOf(ctx, src, variant)
+}
+
+// decodePreviewSource decodes the source of a delivery preview while holding
+// one of the process's picture slots. Previews are made on reads, for old
+// photos and every mask and avatar frame, and used to decode full-size
+// pictures beside the uploads with no limit of their own (theGHub1/docs#180).
+func (p *Processor) decodePreviewSource(ctx context.Context, data []byte, variant config.ImageVariant) (image.Image, func(), error) {
 	if variant.Width <= 0 || variant.Height <= 0 || int64(variant.Width)*int64(variant.Height) > MaxDecodePixels {
-		return nil, ErrImageTooLarge
+		return nil, nil, ErrImageTooLarge
 	}
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > MaxDecodePixels {
-		return nil, ErrImageTooLarge
+	if err := checkDecodable(cfg); err != nil {
+		return nil, nil, err
+	}
+	release, err := acquireSlot(ctx)
+	if err != nil {
+		return nil, nil, err
 	}
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		release()
+		return nil, nil, err
 	}
-	return p.previewOf(ctx, src, variant)
+	return src, release, nil
 }
 
 // CroppedPreview is ConfiguredPreview of a part of the picture: the frame an
 // avatar was given, as fractions of the picture's width and height from its
 // top left corner. The bytes are cut in memory and never stored whole.
 func (p *Processor) CroppedPreview(ctx context.Context, data []byte, variant config.ImageVariant, x, y, w, h float64) ([]byte, error) {
-	if variant.Width <= 0 || variant.Height <= 0 || int64(variant.Width)*int64(variant.Height) > MaxDecodePixels {
-		return nil, ErrImageTooLarge
-	}
-	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	src, release, err := p.decodePreviewSource(ctx, data, variant)
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > MaxDecodePixels {
-		return nil, ErrImageTooLarge
-	}
-	src, _, err := image.Decode(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
+	defer release()
 	bounds := src.Bounds()
 	part := image.Rect(
 		bounds.Min.X+int(math.Round(x*float64(bounds.Dx()))),
@@ -124,9 +173,18 @@ func (p *Processor) CroppedPreview(ctx context.Context, data []byte, variant con
 	if part.Dx() < 1 || part.Dy() < 1 {
 		return nil, fmt.Errorf("the frame lies outside the picture")
 	}
+	// The frame is a view of the decode, not a second full-size copy of it.
+	if sub, ok := src.(subImager); ok {
+		return p.previewOf(ctx, sub.SubImage(part), variant)
+	}
 	framed := image.NewNRGBA(image.Rect(0, 0, part.Dx(), part.Dy()))
 	draw.Draw(framed, framed.Bounds(), src, part.Min, draw.Src)
 	return p.previewOf(ctx, framed, variant)
+}
+
+// subImager is every standard decoded image: SubImage shares its pixels.
+type subImager interface {
+	SubImage(image.Rectangle) image.Image
 }
 
 func (p *Processor) previewOf(ctx context.Context, src image.Image, variant config.ImageVariant) ([]byte, error) {
@@ -157,8 +215,8 @@ func (p *Processor) Process(ctx context.Context, data []byte, contentType string
 	if err != nil {
 		return Result{IsImage: false}, nil
 	}
-	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > MaxDecodePixels {
-		return Result{}, ErrImageTooLarge
+	if err := checkDecodable(cfg); err != nil {
+		return Result{}, err
 	}
 
 	result := Result{
@@ -233,8 +291,8 @@ func (p *Processor) ProcessPrivacy(ctx context.Context, data []byte, contentType
 	if err != nil {
 		return nil, nil
 	}
-	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > MaxDecodePixels {
-		return nil, ErrImageTooLarge
+	if err := checkDecodable(cfg); err != nil {
+		return nil, err
 	}
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {

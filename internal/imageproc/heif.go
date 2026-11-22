@@ -3,7 +3,10 @@ package imageproc
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
+	"image"
+	"image/color"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +51,17 @@ func JPEGFilename(filename string) string {
 // so the stored original, every variant and the delivery link all carry a
 // format every browser can display.
 func (p *Processor) TranscodeHEIF(ctx context.Context, data []byte) ([]byte, error) {
+	// heif-convert decodes the whole picture in its own memory, beside this
+	// process and outside GOMEMLIMIT, and libheif itself allows a gigapixel.
+	// A grid of identical tiles is a few kilobytes declaring that much, so
+	// the declared size is checked before the tool runs (theGHub1/docs#180).
+	width, height, ok := heifDimensions(data)
+	if !ok {
+		return nil, fmt.Errorf("heif: image size is not declared")
+	}
+	if err := checkDecodable(image.Config{Width: width, Height: height, ColorModel: color.NRGBAModel}); err != nil {
+		return nil, err
+	}
 	release, err := acquireSlot(ctx)
 	if err != nil {
 		return nil, err
@@ -90,4 +104,72 @@ func (p *Processor) TranscodeHEIF(ctx context.Context, data []byte) ([]byte, err
 		}
 	}
 	return converted, nil
+}
+
+// heifDimensions is the largest image size a HEIF file declares: the widest
+// "ispe" (image spatial extents) property in meta/iprp/ipco. Every image item
+// must carry one (ISO/IEC 23008-12); a grid's own ispe is the full picture,
+// its tiles and thumbnails are smaller.
+func heifDimensions(data []byte) (width, height int, ok bool) {
+	meta, found := heifChild(data, "meta")
+	if !found || len(meta) < 4 {
+		return 0, 0, false
+	}
+	iprp, found := heifChild(meta[4:], "iprp") // meta is a full box
+	if !found {
+		return 0, 0, false
+	}
+	ipco, found := heifChild(iprp, "ipco")
+	if !found {
+		return 0, 0, false
+	}
+	var best uint64
+	heifEach(ipco, func(kind string, body []byte) {
+		// ispe: version and flags (4), image_width (4), image_height (4).
+		if kind != "ispe" || len(body) < 12 {
+			return
+		}
+		w := binary.BigEndian.Uint32(body[4:8])
+		h := binary.BigEndian.Uint32(body[8:12])
+		if pixels := uint64(w) * uint64(h); !ok || pixels > best {
+			best, width, height, ok = pixels, int(w), int(h), true
+		}
+	})
+	return width, height, ok
+}
+
+// heifChild is the body of the first box of the given type at this level.
+func heifChild(data []byte, want string) ([]byte, bool) {
+	var found []byte
+	var ok bool
+	heifEach(data, func(kind string, body []byte) {
+		if !ok && kind == want {
+			found, ok = body, true
+		}
+	})
+	return found, ok
+}
+
+// heifEach walks the ISOBMFF boxes at one level and stops at the first box
+// whose size does not fit.
+func heifEach(data []byte, visit func(kind string, body []byte)) {
+	for len(data) >= 8 {
+		size := uint64(binary.BigEndian.Uint32(data[0:4]))
+		kind := string(data[4:8])
+		header := uint64(8)
+		switch size {
+		case 0: // to the end of the enclosing box
+			size = uint64(len(data))
+		case 1: // 64-bit size follows the type
+			if len(data) < 16 {
+				return
+			}
+			size, header = binary.BigEndian.Uint64(data[8:16]), 16
+		}
+		if size < header || size > uint64(len(data)) {
+			return
+		}
+		visit(kind, data[header:size])
+		data = data[size:]
+	}
 }

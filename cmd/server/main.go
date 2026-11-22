@@ -13,6 +13,7 @@ import (
 	"github.com/borg001/ipfs-filestorage/internal/config"
 	"github.com/borg001/ipfs-filestorage/internal/handler"
 	"github.com/borg001/ipfs-filestorage/internal/middleware"
+	"github.com/borg001/ipfs-filestorage/internal/publicmedia"
 )
 
 func main() {
@@ -99,6 +100,31 @@ func main() {
 		}),
 	)
 
+	// Public media packages (films of the platform's own sites) answer
+	// /public/ ahead of authentication, with their own CORS and rate limit;
+	// every other path goes to the authenticated router unchanged.
+	var root http.Handler = wrapped
+	public, err := publicmedia.New(publicmedia.Config{
+		Packages:      cfg.PublicMedia.Packages,
+		Origins:       cfg.PublicMedia.Origins,
+		LinkTTL:       cfg.PublicMedia.LinkTTL,
+		SigningKey:    cfg.PublicMedia.SigningKey,
+		AllowNoOrigin: cfg.PublicMedia.AllowNoOrigin,
+	}, handlers.Cluster())
+	if err != nil {
+		log.Fatalf("[PUBLIC] %v", err)
+	}
+	if public != nil {
+		root = public.Mount(wrapped,
+			middleware.PanicRecovery(),
+			middleware.RateLimit(middleware.RateLimitConfig{
+				RPS:   cfg.PublicMedia.RateLimit.RPS,
+				Burst: cfg.PublicMedia.RateLimit.Burst,
+			}),
+		)
+		log.Printf("[PUBLIC] media packages: %s", strings.Join(public.Names(), ", "))
+	}
+
 	port := os.Getenv("SERVER_PORT")
 	if port == "" {
 		port = cfg.Server.Port
@@ -106,7 +132,7 @@ func main() {
 
 	log.Printf("Server listening on :%s", port)
 	// The health check is answered ahead of the rate limit and authentication.
-	if err := http.ListenAndServe(":"+port, handler.WithHealth(wrapped)); err != nil {
+	if err := http.ListenAndServe(":"+port, handler.WithHealth(root)); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 }
